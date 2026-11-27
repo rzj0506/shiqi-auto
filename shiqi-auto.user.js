@@ -2,7 +2,7 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.8.0
+// @version      0.9.0
 // @description  副本内自动躲红圈、首领和怪物，支持事件、按本局等级拾取、收尾磁石、捕捉和重复战斗。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
@@ -178,7 +178,7 @@
         <small class="hint">0 关闭 · 拾取需开启战斗小地图（N）</small>
       </div>
       <div class="section">
-        <label class="row" for="capture"><span>自动捕捉宠物</span><input class="switch" id="capture" type="checkbox"></label>
+        <label class="row" for="capture"><span>追踪并自动捕捉宠物</span><input class="switch" id="capture" type="checkbox"></label>
         <label class="row subrow" id="capture-details" for="rate">
           <span>捕捉率高于此数值才捕捉</span>
           <span class="unit"><input class="control" id="rate" type="number" min="0" max="100" step="1">%</span>
@@ -292,8 +292,36 @@
     hudObserver = null;
   }
 
-  function observeHudText(hud, canvas, gameContext, text, x, y) {
-    if (Math.abs(x - 58) <= 1 && Math.abs(y - 59) <= 1 && /^[1-9]\d{0,2}$/.test(text)) {
+  function textCenter(gameContext, text, x, missingPrefix = '') {
+    if (gameContext.textAlign === 'center') return x;
+    const half = gameContext.measureText(missingPrefix + text).width / 2;
+    if (gameContext.textAlign === 'right' || gameContext.textAlign === 'end') return x - half;
+    return x + half - gameContext.measureText(missingPrefix).width;
+  }
+
+  const merchantSubtitle = '站 2 秒：60 石幣換一次升級';
+  function observeHudText(hud, canvas, gameContext, raw, x, y) {
+    const text = raw.trim();
+    if ((text === '暫停' || text === '暂停') && x >= 54 && x <= 72 && y >= 34 && y <= 62) {
+      hud.paused = true;
+    } else if (text.startsWith('打字中：遊戲暫停') && y >= 460 && y <= 480) {
+      hud.paused = true;
+    } else if (text === '升級！' && x === 400 && y >= 50 && y <= 74) {
+      hud.paused = true;
+    } else if (/^流浪商人(?:\s*\d{1,2}\s*秒)?$/.test(text)) {
+      hud.merchantTitle = { x, y };
+      if (/\d/.test(text) && gameContext.textAlign === 'center') hud.merchants.push({ x, y: y - 28 });
+    } else if (hud.merchantTitle && Math.abs(y - hud.merchantTitle.y - 17) <= 2
+      && Math.abs(x - hud.merchantTitle.x) < 150 && (text === '站' || text === merchantSubtitle)) {
+      hud.merchants.push({ x: textCenter(gameContext, merchantSubtitle, x), y: y - 45 });
+    } else if (options.capture && /^(?:1\s*)?等[寵宠][：:]\s*\S/.test(text)) {
+      const prefix = /^\s*1/.test(raw) ? '' : '1';
+      hud.petArrows.push({ x: textCenter(gameContext, raw, x, prefix), y });
+    } else if (options.capture && /^(?:1\s*)?等[寵宠]$/.test(text)) {
+      const prefix = /^\s*1/.test(raw) ? '' : '1';
+      const width = gameContext.measureText(prefix + raw).width;
+      hud.pets.push({ x: textCenter(gameContext, raw, x, prefix) + 14 - width / 2, y: y - 19.5 });
+    } else if (Math.abs(x - 58) <= 1 && Math.abs(y - 59) <= 1 && /^[1-9]\d{0,2}$/.test(text)) {
       hud.levelBadge = Number(text);
     } else if (text === '本局' && Math.abs(x - 58) <= 1 && Math.abs(y - 78) <= 1) {
       hud.level = hud.levelBadge;
@@ -331,32 +359,32 @@
     }
   }
 
-  function readHud(now) {
-    if (!options.magnet && !options.capture && !options.repeat && !options.pickupBefore) {
-      stopHudObserver();
-      return null;
-    }
+  function watchGameCanvas() {
     const canvas = document.querySelector('canvas#overlay');
     if (hudObserver?.canvas !== canvas) stopHudObserver();
-    if (!canvas) return null;
+    if (!canvas) return false;
     if (!hudObserver) {
       const gameContext = canvas.getContext('2d');
-      if (!gameContext) return null;
+      if (!gameContext) return false;
       const original = Object.fromEntries(['fillText', 'clearRect'].map(key => [key, Object.getOwnPropertyDescriptor(gameContext, key)]));
       const drawText = gameContext.fillText, clear = gameContext.clearRect;
       let hud = null;
       // 读取本帧的游戏界面文字，绘图仍交给原有的 Canvas 方法。
       const fillText = function (text, x, y) {
         const result = drawText.apply(this, arguments);
-        if (hud && typeof text === 'string' && text.length <= 32) {
-          try { observeHudText(hud, canvas, this, text.trim(), x, y); } catch { hud = null; }
+        if (hud && typeof text === 'string' && text.length <= 48) {
+          try { observeHudText(hud, canvas, this, text, x, y); } catch { /* 略过无法识别的文字。 */ }
         }
         return result;
       };
       const clearRect = function (x, y, width, height) {
         const result = clear.apply(this, arguments);
         if (x === 0 && y === 0 && width >= canvas.width && height >= canvas.height) {
-          hud = { at: performance.now(), stock: [] };
+          const current = hud = { at: performance.now(), stock: [], merchants: [], petArrows: [], pets: [] };
+          // 等这轮画布绘制结束后再读图。游戏后台 Worker 绘制的帧同样会到这里。
+          queueMicrotask(() => {
+            if (enabled && hudObserver?.latest() === current) runBattleFrame(performance.now(), current);
+          });
         }
         return result;
       };
@@ -366,11 +394,10 @@
         gameContext.clearRect = clearRect;
       } catch {
         stopHudObserver();
-        return null;
+        return false;
       }
     }
-    const hud = hudObserver.latest();
-    return hud && now - hud.at <= 220 ? hud : null;
+    return true;
   }
 
   function at(x, y) {
@@ -745,7 +772,7 @@
     nextMapScan = now + (options.avoidMonsters ? 65 : eventScanInterval);
   }
 
-  function scanEvents(now) {
+  function scanEvents(now, hud) {
     const overlay = document.querySelector('canvas#overlay');
     if (!eventContext || !overlay?.width || !overlay.height) return [];
     const width = Math.round(overlay.width / overlay.height * 300), height = 300;
@@ -759,6 +786,13 @@
     eventContext.drawImage(overlay, 0, 0, width, height);
     const { ground, arrows } = eventMasks(eventContext.getImageData(0, 0, width, height).data, width, height);
     return findEventArrows(arrows, width, height, findGroundMarkers(ground, width, height)).flatMap((mark, type) => {
+      if (eventTypes[type].merchant && hud?.merchants.length) {
+        const markers = hud.merchants.map(label => {
+          const x = label.x - overlay.width / overlay.height * 300, y = label.y - 300;
+          return { type, x, y, arrow: false, distance: Math.hypot(x, y / 0.75), seenAt: now };
+        });
+        return [markers.reduce((best, marker) => marker.distance < best.distance ? marker : best)];
+      }
       if (type === shrineType && (!mark || mark.arrow) && battleMap?.shrine) {
         const x = battleMap.shrine.x * eventZoom, y = battleMap.shrine.y * eventZoom;
         return [{ type, x, y, arrow: false, fromMap: true, distance: Math.hypot(x, y / 0.75), seenAt: now }];
@@ -773,7 +807,7 @@
   let lastStatus = '';
   let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
   let battleMap = null, nextMapScan = 0, pickupPlan = null, pickupBlockedUntil = 0, monsterPlan = null;
-  let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0;
+  let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0, petPlan = null;
   let resultSince = null, repeatSent = false;
 
   function show(status) {
@@ -843,9 +877,15 @@
     pickupPlan = null;
   }
 
+  function stopPetApproach() {
+    if (petPlan) releaseMovement();
+    petPlan = null;
+  }
+
   function resetEvents() {
     stopEvent();
     stopPickup();
+    stopPetApproach();
     eventList = [];
     nextEventScan = 0;
     pickupBlockedUntil = 0;
@@ -889,9 +929,11 @@
     }
     if (captureCandidate?.rate !== rate) {
       captureCandidate = { rate, at: hud.at };
-      return false;
+      resetEvents();
+      show('确认捕捉率 · ' + rate + '%');
+      return true;
     }
-    if (hud.at === captureCandidate.at) return false;
+    if (hud.at === captureCandidate.at) return true;
     captureCandidate = null;
     resetEvents();
     nextCaptureAt = now + 1600;
@@ -1005,6 +1047,72 @@
     return best;
   }
 
+  function petTarget(hud, width) {
+    const visible = hud.pets.map(pet => {
+      const x = pet.x - width / 2, y = pet.y + 80 * eventZoom - 300;
+      return { x, y, distance: Math.hypot(x, y), visible: true };
+    });
+    if (visible.length) return visible.reduce((best, pet) => pet.distance < best.distance ? pet : best);
+    if (!hud.petArrows.length) return null;
+
+    // 等级 1 的宠物位于屏外时，游戏把箭头固定在屏幕安全区边缘，名称画在箭头的内侧。
+    // 用名称的坐标反推出指向，避免把与它同屏显示的宝藏箭头当成宠物。
+    let best = null, error = 32;
+    const centerX = width / 2;
+    for (let i = 0; i < 180; i++) {
+      const angle = i * Math.PI / 90, dx = Math.cos(angle), dy = Math.sin(angle);
+      const reach = Math.min((centerX - 80) / Math.max(0.001, Math.abs(dx)),
+        (dy >= 0 ? 140 : 150) / Math.max(0.001, Math.abs(dy)));
+      const arrowX = centerX + dx * reach;
+      let arrowY = 300 + dy * reach;
+      if (arrowX > width - 190 && arrowY < 240) arrowY = 240;
+      const labelX = arrowX - dx * 74, labelY = arrowY - dy * 58 - 8;
+      for (const arrow of hud.petArrows) {
+        const distance = Math.hypot(labelX - arrow.x, labelY - arrow.y);
+        if (distance >= error) continue;
+        error = distance;
+        best = { x: dx * 420, y: dy * 420, distance: 420, visible: false };
+      }
+    }
+    return best;
+  }
+
+  function stepPetApproach(data, now, hud) {
+    if (!options.capture || !hud || options.rate >= 100 || validNumber(hud.rate, 100)
+      || (hud.ropeBadge && !(hud.ropes > 0))) {
+      stopPetApproach();
+      return false;
+    }
+    const overlay = hudObserver?.canvas;
+    const target = overlay?.height ? petTarget(hud, overlay.width / overlay.height * 600) : null;
+    if (!target) {
+      if (petPlan?.direction && now - petPlan.seenAt <= 200
+        && !warningOnPath(data, petPlan.direction, 24)) {
+        drive(petPlan.direction);
+        return true;
+      }
+      stopPetApproach();
+      return false;
+    }
+    stopPickup();
+    if (petPlan?.visible !== target.visible) {
+      stopPetApproach();
+      petPlan = { visible: target.visible, direction: null, seenAt: now, checkedAt: now, distance: target.distance, skipped: new Set() };
+    }
+    if (target.visible && now - petPlan.checkedAt >= 460) {
+      if (target.distance < petPlan.distance - 12) petPlan.skipped.clear();
+      else if (petPlan.direction) petPlan.skipped.add(petPlan.direction);
+      else petPlan.skipped.clear();
+      petPlan.checkedAt = now;
+      petPlan.distance = target.distance;
+    }
+    petPlan.seenAt = now;
+    petPlan.direction = target.distance > 30 ? eventHeading(data, target, petPlan, 30) : null;
+    drive(petPlan.direction);
+    show(petPlan.direction ? '追踪宠物 ' + petPlan.direction.label : '等待安全捕捉位置');
+    return true;
+  }
+
   function stepPickup(data, now, level) {
     if (!options.pickupBefore) {
       stopPickup();
@@ -1067,7 +1175,7 @@
   function stepEvent(data, now, hud) {
     const level = hud?.level;
     if (now >= nextEventScan) {
-      eventList = scanEvents(now);
+      eventList = scanEvents(now, hud);
       nextEventScan = now + eventScanInterval;
     }
     const fresh = eventList.find(event => !eventTypes[event.type].merchant || now >= retryMerchantAt);
@@ -1079,9 +1187,13 @@
     const target = (keepTracking || mapShrineHold) && (!fresh || tracked.type < fresh.type) ? tracked : fresh;
     if (!target) {
       stopEvent();
-      if (!stepPickup(data, now, level)) show('监测红圈和事件');
+      if (!stepPetApproach(data, now, hud) && !stepPickup(data, now, level)) {
+        const belowThreshold = options.capture && validNumber(hud?.rate, 100) && hud.rate <= options.rate;
+        show(belowThreshold ? '捕捉率未达标 · ' + hud.rate + '%' : '监测红圈和事件');
+      }
       return;
     }
+    stopPetApproach();
     stopPickup();
     if (eventPlan?.target.type !== target.type || eventPlan.target.arrow !== target.arrow) {
       stopEvent();
@@ -1162,17 +1274,21 @@
     show('闪避 ' + dodge.direction.label);
   }
 
-  function frame(now) {
-    window.requestAnimationFrame(frame);
-    if (!enabled || now - lastSample < sampleInterval || document.hidden || !document.hasFocus()) return;
+  function runBattleFrame(now, hud) {
+    if (!enabled || now - lastSample < sampleInterval) return;
     lastSample = now;
+    if (hud?.paused) {
+      resetBattleTracking();
+      captureCandidate = null;
+      show('游戏已暂停');
+      return;
+    }
     if (document.activeElement?.closest('input, textarea, select, [contenteditable="true"]')) {
       resetBattleTracking();
       show('等待游戏输入框关闭');
       return;
     }
     try {
-      const hud = readHud(now);
       if (stepRepeat(hud, now)) return;
       if (stepLoot(hud)) {
         captureCandidate = null;
@@ -1211,12 +1327,19 @@
     }
   }
 
+  function frame(now) {
+    window.requestAnimationFrame(frame);
+    // 前台刷新负责安装画布监听，在监听不可用时可继续识别画面。
+    if (enabled && !watchGameCanvas() && !document.hidden) runBattleFrame(now, null);
+  }
+
   function toggle() {
     enabled = !enabled;
     resetBattleTracking();
     captureCandidate = null;
     resultSince = null;
-    if (!enabled) stopHudObserver();
+    if (enabled) watchGameCanvas();
+    else stopHudObserver();
     show(enabled ? '等待战斗画面' : '已暂停');
   }
 
@@ -1234,10 +1357,15 @@
     captureCandidate = null;
     resultSince = null;
   }
-  window.addEventListener('blur', leavePage);
+  // 原游戏失焦时会清空按键，下一帧根据新画面重新发送按下状态。
+  window.addEventListener('blur', releaseMovement);
   window.addEventListener('pagehide', leavePage);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) leavePage();
+    if (!enabled) return;
+    resetBattleTracking();
+    captureCandidate = null;
+    lastSample = -Infinity;
+    show(document.hidden ? '等待后台战斗画面' : '等待战斗画面');
   });
 
   show('已暂停');
