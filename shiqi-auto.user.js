@@ -2,8 +2,8 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.6.0
-// @description  副本内自动闪避、处理事件，支持收尾磁石、按成功率捕捉和重复战斗。
+// @version      0.7.0
+// @description  副本内自动闪避、处理事件，支持按本局等级拾取、收尾磁石、捕捉和重复战斗。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
 // @supportURL   https://github.com/rzj0506/shiqi-auto/issues
@@ -46,32 +46,44 @@
 
   const eventSample = document.createElement('canvas');
   const eventContext = eventSample.getContext('2d', { willReadFrequently: true });
+  const mapSample = document.createElement('canvas');
+  const mapContext = mapSample.getContext('2d', { willReadFrequently: true });
+  mapSample.width = 162;
+  mapSample.height = 132;
+  const mapWorldScale = 3200 / 150;
   const eventScanInterval = 100;
   const eventTrackTimeout = 220;
   // 事件按此顺序处理。地面标记和场外指示箭头分别使用游戏原有的配色。
   const eventTypes = [
     { name: '挑衅战旗', action: '正在踩战旗', ring: [255, 90, 74], stop: 48 },
     { name: '受伤的小宠物', action: '正在守护小宠物', ring: [143, 255, 160], stop: 38 },
-    { name: '流浪商人', action: '等待商人交易', ring: [255, 212, 92], arrow: [255, 211, 107], stop: 38 },
+    { name: '祝福石碑', action: '等待石碑祝福', ring: [190, 240, 255], arrow: [143, 216, 255], radius: 95, stop: 55, shrine: true },
+    { name: '流浪商人', action: '等待商人交易', ring: [255, 212, 92], arrow: [255, 211, 107], stop: 38, merchant: true },
     { name: '赌博石像', action: '等待石像触发', ring: [255, 154, 213], dashed: true, stop: 38 },
   ];
+  const shrineType = eventTypes.findIndex(type => type.shrine);
   const ringAngles = Array.from({ length: 24 }, (_, i) => {
     const angle = i * Math.PI / 12;
     return [Math.cos(angle), Math.sin(angle)];
   });
+  const eventRings = eventTypes.map(type => {
+    const rx = (type.radius ?? 60) / 2, ry = rx * 0.75;
+    return { rx, ry, offsets: ringAngles.map(([x, y]) => [Math.round(x * rx), Math.round(y * ry)]) };
+  });
 
   const settingsKey = 'sa-survivors-local-helper.settings';
   const slotKeys = ['z', 'x', 'c'];
-  const options = { magnet: false, magnetSlot: '', capture: false, rate: 60, repeat: false };
+  const options = { magnet: false, magnetSlot: '', capture: false, rate: 60, repeat: false, pickupBefore: 0 };
   let position = { x: 12, y: 86 };
-  function validRate(value) {
-    return Number.isInteger(value) && value >= 0 && value <= 100;
+  function validNumber(value, maximum) {
+    return Number.isInteger(value) && value >= 0 && value <= maximum;
   }
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
     for (const name of ['magnet', 'capture', 'repeat']) options[name] = saved?.[name] === true;
     if (slotKeys.includes(saved?.magnetSlot)) options.magnetSlot = saved.magnetSlot;
-    if (validRate(saved?.rate)) options.rate = saved.rate;
+    if (validNumber(saved?.rate, 100)) options.rate = saved.rate;
+    if (validNumber(saved?.pickupBefore, 999)) options.pickupBefore = saved.pickupBefore;
     if (Number.isFinite(saved?.position?.x) && Number.isFinite(saved?.position?.y)) position = saved.position;
   } catch { /* 使用默认设置。 */ }
 
@@ -154,6 +166,13 @@
         </label>
       </div>
       <div class="section">
+        <label class="row" for="pickupBefore">
+          <span>本局等级低于此值时拾取</span>
+          <input class="control" id="pickupBefore" type="number" min="0" max="999" step="1">
+        </label>
+        <small class="hint">0 关闭 · 拾取需开启战斗小地图（N）</small>
+      </div>
+      <div class="section">
         <label class="row" for="capture"><span>自动捕捉宠物</span><input class="switch" id="capture" type="checkbox"></label>
         <label class="row subrow" id="capture-details" for="rate">
           <span>捕捉率高于此数值才捕捉</span>
@@ -197,19 +216,24 @@
     shadow.querySelector('#capture-details').hidden = !options.capture;
   }
 
-  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'repeat']) {
+  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'repeat', 'pickupBefore']) {
     const input = shadow.getElementById(field);
     if (input.type === 'checkbox') input.checked = options[field];
     else input.value = options[field];
     input.addEventListener('change', () => {
       if (input.type === 'checkbox') options[field] = input.checked;
-      else if (field === 'rate') {
-        if (validRate(input.valueAsNumber)) options.rate = input.valueAsNumber;
-        input.value = String(options.rate);
+      else if (input.type === 'number') {
+        if (validNumber(input.valueAsNumber, Number(input.max))) options[field] = input.valueAsNumber;
+        input.value = String(options[field]);
       } else options[field] = input.value;
       refreshSettings();
       persistOptions();
     });
+    if (input.type === 'number') {
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') input.blur();
+      });
+    }
   }
   refreshSettings();
   document.body.append(panel);
@@ -218,9 +242,6 @@
   for (const type of ['keydown', 'keyup', 'pointerdown', 'click']) {
     panel.addEventListener(type, event => event.stopPropagation());
   }
-  shadow.querySelector('#rate').addEventListener('keydown', event => {
-    if (event.key === 'Enter') event.currentTarget.blur();
-  });
 
   let drag = null, suppressClick = false;
   handle.addEventListener('pointerdown', event => {
@@ -267,7 +288,11 @@
   }
 
   function observeHudText(hud, canvas, gameContext, text, x, y) {
-    if (text === '結算' || text === '結算 Enter') {
+    if (Math.abs(x - 58) <= 1 && Math.abs(y - 59) <= 1 && /^[1-9]\d{0,2}$/.test(text)) {
+      hud.levelBadge = Number(text);
+    } else if (text === '本局' && Math.abs(x - 58) <= 1 && Math.abs(y - 78) <= 1) {
+      hud.level = hud.levelBadge;
+    } else if (text === '結算' || text === '結算 Enter') {
       if (y >= 65 && y <= 92) hud.loot = true;
     } else if (text === '再來一局' && y >= 537 && y <= 546) {
       hud.repeat = /^(#fff|#ffffff)$/.test(gameContext.fillStyle);
@@ -302,7 +327,7 @@
   }
 
   function readHud(now) {
-    if (!options.magnet && !options.capture && !options.repeat) {
+    if (!options.magnet && !options.capture && !options.repeat && !options.pickupBefore) {
       stopHudObserver();
       return null;
     }
@@ -457,33 +482,40 @@
 
   function findGroundMarkers(mask, width, height) {
     // 由颜色匹配的像素找候选位置，再确认是否存在对应的椭圆轮廓。
-    const rx = 30, ry = 22.5, bin = 2;
-    const gridWidth = Math.ceil(width / bin), gridHeight = Math.ceil(height / bin);
+    // 游戏在圆心刚移出画面时仍绘制光圈。把投票区延伸到画布边缘外。
+    const bin = 2, margin = 11;
+    const gridWidth = Math.ceil(width / bin) + margin * 2;
+    const gridHeight = Math.ceil(height / bin) + margin * 2;
     const votes = eventTypes.map(() => new Uint16Array(gridWidth * gridHeight));
-    const offsets = ringAngles.map(([x, y]) => [Math.round(x * rx), Math.round(y * ry)]);
     for (let point = 0; point < mask.length; point++) {
       if (!mask[point]) continue;
-      const x = point % width, y = Math.floor(point / width), bucket = votes[mask[point] - 1];
-      for (const [dx, dy] of offsets) {
-        const bx = Math.floor((x - dx) / bin), by = Math.floor((y - dy) / bin);
+      const type = mask[point] - 1;
+      const x = point % width, y = Math.floor(point / width), bucket = votes[type];
+      for (const [dx, dy] of eventRings[type].offsets) {
+        const bx = margin + Math.floor((x - dx) / bin), by = margin + Math.floor((y - dy) / bin);
         if (bx >= 0 && bx < gridWidth && by >= 0 && by < gridHeight) bucket[by * gridWidth + bx]++;
       }
     }
     return votes.map((bucket, type) => {
+      const { rx, ry } = eventRings[type];
       const peaks = [];
       for (let point = 0; point < bucket.length; point++) {
         if (bucket[point] >= (eventTypes[type].dashed ? 4 : 6)) peaks.push(point);
       }
       peaks.sort((a, b) => bucket[b] - bucket[a]);
-      let best = null, bestScore = eventTypes[type].dashed ? 8 : 11;
+      let best = null, bestScore = 0;
       for (const point of peaks.slice(0, 24)) {
-        const x = point % gridWidth * bin, y = Math.floor(point / gridWidth) * bin;
+        const x = (point % gridWidth - margin) * bin, y = (Math.floor(point / gridWidth) - margin) * bin;
         for (let oy = -1; oy <= bin; oy++) {
           for (let ox = -1; ox <= bin; ox++) {
-            const score = markerScore(mask, width, height, type + 1, x + ox, y + oy, rx, ry, 2);
-            if (score < bestScore || (best && score === bestScore)) continue;
-            best = { x: x + ox, y: y + oy, arrow: false };
-            bestScore = score;
+            const cx = x + ox, cy = y + oy;
+            const clipped = cx < 0 || cx >= width || cy < 0 || cy >= height;
+            const score = markerScore(mask, width, height, type + 1, cx, cy, rx, ry, 2);
+            const minimum = (eventTypes[type].dashed ? 8 : 11) - (clipped ? 3 : 0);
+            const ranked = score - (clipped ? 2 : 0);
+            if (score < minimum || ranked <= bestScore) continue;
+            best = { x: cx, y: cy, arrow: false };
+            bestScore = ranked;
           }
         }
         if (bestScore === ringAngles.length) break;
@@ -520,8 +552,89 @@
     });
   }
 
-  function scanEvents(now) {
+  const mapPlayerWhite = [255, 255, 255];
+  const mapPlayerOutline = [59, 38, 20];
+  const mapShrineColor = [159, 232, 255];
+  const mapLootDots = [[124, 255, 124], [255, 154, 213], [255, 212, 92]];
+  const mapItemColors = [[232, 220, 196], [124, 255, 124], [106, 184, 255], [201, 166, 255], [255, 176, 80], [255, 106, 74], mapPlayerWhite];
+  const mapAxes = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const mapCorners = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
+  const mapItemOutline = [0, 0, 0];
+
+  function findMapShrine(data, width, height, playerX, playerY) {
+    const mask = new Uint8Array(width * height);
+    const votes = new Uint8Array(mask.length);
+    for (let y = playerY - 50; y <= playerY + 50; y++) {
+      for (let x = 6; x < width - 6; x++) {
+        const point = y * width + x;
+        if (data[point * 4 + 3] < 160 || !eventColor(data, point * 4, mapShrineColor, 13)) continue;
+        mask[point] = 1;
+        for (let angle = 0; angle < 12; angle++) {
+          const [cos, sin] = ringAngles[angle * 2];
+          votes[(y + Math.round(sin * 4.5)) * width + x + Math.round(cos * 4.5)]++;
+        }
+      }
+    }
+    let best = null, bestScore = 0;
+    for (let point = 0; point < votes.length; point++) {
+      if (votes[point] < 4) continue;
+      const x = point % width, y = Math.floor(point / width);
+      const score = markerScore(mask, width, height, 1, x, y, 4.5, 4.5);
+      if (score < 13) continue;
+      const distance = Math.hypot(x - playerX, (y - playerY) / 0.75);
+      const ranked = score - distance * 0.09;
+      if (ranked <= bestScore) continue;
+      bestScore = ranked;
+      best = { x: (x - playerX) * mapWorldScale, y: (y - playerY) * mapWorldScale };
+    }
+    return best;
+  }
+
+  function readBattleMap(overlay, pickupAllowed) {
+    if (!mapContext) return null;
+    const scale = overlay.height / 600;
+    const width = mapSample.width, height = mapSample.height;
+    if (overlay.width < 170 * scale) return null;
+    mapContext.imageSmoothingEnabled = false;
+    mapContext.clearRect(0, 0, width, height);
+    mapContext.drawImage(overlay, overlay.width - 170 * scale, 84 * scale, width * scale, height * scale, 0, 0, width, height);
+    const data = mapContext.getImageData(0, 0, width, height).data;
+    const pixel = (x, y) => (y * width + x) * 4;
+    const playerX = 81;
+    const playerY = [74, 58].find(y => eventColor(data, pixel(playerX, y), mapPlayerWhite, 7)
+      && mapAxes.every(([dx, dy]) => eventColor(data, pixel(playerX + dx, y + dy), mapPlayerWhite, 7))
+      && mapAxes.filter(([dx, dy]) => eventColor(data, pixel(playerX + dx * 4, y + dy * 4), mapPlayerOutline, 24)).length >= 3);
+    if (playerY === undefined) return null;
+    const shrine = findMapShrine(data, width, height, playerX, playerY);
+    const pickups = [];
+    if (!pickupAllowed) return { shrine, pickups };
+    // 小地图用有黑边的方块画装备，用小圆点画素材、肉和石币。
+    const reach = 24;
+    for (let y = playerY - reach; y <= playerY + reach; y++) {
+      for (let x = playerX - reach; x <= playerX + reach; x++) {
+        const distance = Math.hypot(x - playerX, y - playerY);
+        if (distance > reach || distance < 5) continue;
+        const p = pixel(x, y);
+        const square = mapItemColors.find(color => eventColor(data, p, color, 9));
+        const match = (color, dx, dy, tolerance = 9) => eventColor(data, pixel(x + dx, y + dy), color, tolerance);
+        const gear = square && mapCorners.filter(([dx, dy]) => match(square, dx, dy, 35)).length >= 3
+          && mapAxes.filter(([dx, dy]) => match(mapItemOutline, dx * 3, dy * 3, 76)
+            || match(mapItemOutline, dx * 4, dy * 4, 76)).length >= 3;
+        const dot = mapLootDots.find(color => eventColor(data, p, color, 9));
+        const smallDrop = dot && mapAxes.every(([dx, dy]) => match(dot, dx, dy))
+          && mapAxes.filter(([dx, dy]) => match(dot, dx * 3, dy * 3)).length <= 1;
+        if (!gear && !smallDrop) continue;
+        pickups.push({ x: (x - playerX) * mapWorldScale, y: (y - playerY) * mapWorldScale, distance: distance * mapWorldScale });
+      }
+    }
+    pickups.sort((a, b) => a.distance - b.distance);
+    return { shrine, pickups };
+  }
+
+  function scanEvents(now, pickupAllowed) {
     const overlay = document.querySelector('canvas#overlay');
+    battleMap = overlay?.width && overlay.height ? readBattleMap(overlay, pickupAllowed) : null;
+    if (battleMap) battleMap.at = now;
     if (!eventContext || !overlay?.width || !overlay.height) return [];
     const width = Math.round(overlay.width / overlay.height * 300), height = 300;
     if (width < 100 || width > 1000) return [];
@@ -534,6 +647,10 @@
     eventContext.drawImage(overlay, 0, 0, width, height);
     const { ground, arrows } = eventMasks(eventContext.getImageData(0, 0, width, height).data, width, height);
     return findEventArrows(arrows, width, height, findGroundMarkers(ground, width, height)).flatMap((mark, type) => {
+      if (type === shrineType && (!mark || mark.arrow) && battleMap?.shrine) {
+        const x = battleMap.shrine.x * eventZoom, y = battleMap.shrine.y * eventZoom;
+        return [{ type, x, y, arrow: false, fromMap: true, distance: Math.hypot(x, y / 0.75), seenAt: now }];
+      }
       if (!mark) return [];
       const x = (mark.x - width / 2 + 0.5) * 2, y = (mark.y - height / 2 + 0.5) * 2;
       return [{ type, x, y, arrow: mark.arrow, distance: Math.hypot(x, y / 0.75), seenAt: now }];
@@ -543,6 +660,7 @@
   let enabled = false, dodge = null, heldKeys = [], movementTimer = null, lastSample = -Infinity;
   let lastStatus = '';
   let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
+  let battleMap = null, pickupPlan = null, pickupBlockedUntil = 0;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0;
   let resultSince = null, repeatSent = false;
 
@@ -603,10 +721,18 @@
     eventPlan = null;
   }
 
+  function stopPickup() {
+    if (pickupPlan) releaseMovement();
+    pickupPlan = null;
+  }
+
   function resetEvents() {
     stopEvent();
+    stopPickup();
     eventList = [];
     nextEventScan = 0;
+    battleMap = null;
+    pickupBlockedUntil = 0;
   }
 
   function stepLoot(hud) {
@@ -634,7 +760,7 @@
       return true;
     }
     const rate = hud.rate;
-    if (!validRate(rate) || rate <= options.rate || (hud.ropeBadge && !(hud.ropes > 0)) || now < nextCaptureAt) {
+    if (!validNumber(rate, 100) || rate <= options.rate || (hud.ropeBadge && !(hud.ropes > 0)) || now < nextCaptureAt) {
       captureCandidate = null;
       return false;
     }
@@ -688,25 +814,86 @@
     return best;
   }
 
-  function stepEvent(data, now) {
+  function stepPickup(data, now, level) {
+    if (!options.pickupBefore) {
+      stopPickup();
+      return false;
+    }
+    if (now < pickupBlockedUntil) return false;
+    if (!Number.isInteger(level) || level >= options.pickupBefore) {
+      stopPickup();
+      if (Number.isInteger(level)) return false;
+      show('等待读取本局等级');
+      return true;
+    }
+    if (!battleMap) {
+      stopPickup();
+      show('拾取需要战斗小地图');
+      return true;
+    }
+    let target = battleMap.pickups[0];
+    if (pickupPlan) {
+      const last = pickupPlan.target;
+      const next = battleMap.pickups.find(drop => Math.hypot(drop.x - last.x, drop.y - last.y) < 84);
+      if (next) {
+        target = next;
+        pickupPlan.finishAt = null;
+      } else if (pickupPlan.direction) {
+        // 掉落标记靠近时会被角色白点遮住，走完短距离就重新判断。
+        const extra = last.distance <= 205 ? Math.min(680, Math.max(170, (last.distance - 55) * 5)) : 165;
+        pickupPlan.finishAt ??= now + extra;
+        if (now < pickupPlan.finishAt && ![12, 24, 36, 48].some(distance => warningOnPath(data, pickupPlan.direction, distance))) {
+          drive(pickupPlan.direction);
+          show('靠近掉落物 · 本局 ' + level + ' 级');
+          return true;
+        }
+      }
+      if (!next) stopPickup();
+    }
+    if (!target) return false;
+    pickupPlan ??= { target, direction: null, skipped: new Set(), checkedAt: battleMap.at, distance: target.distance, finishAt: null };
+    if (battleMap.at - pickupPlan.checkedAt >= 500) {
+      if (target.distance <= pickupPlan.distance - 12) pickupPlan.skipped.clear();
+      else if (pickupPlan.direction) pickupPlan.skipped.add(pickupPlan.direction);
+      if (pickupPlan.skipped.size > 2) {
+        stopPickup();
+        pickupBlockedUntil = now + 800;
+        return false;
+      }
+      pickupPlan.checkedAt = battleMap.at;
+      pickupPlan.distance = target.distance;
+    }
+    pickupPlan.target = target;
+    const heading = { x: target.x * eventZoom, y: target.y * eventZoom, distance: target.distance * eventZoom };
+    pickupPlan.direction = eventHeading(data, heading, pickupPlan, 40 * eventZoom);
+    drive(pickupPlan.direction);
+    show(pickupPlan.direction ? '拾取掉落物 ' + pickupPlan.direction.label + ' · 本局 ' + level + ' 级' : '等待安全拾取路线');
+    return true;
+  }
+
+  function stepEvent(data, now, hud) {
+    const level = hud?.level;
     if (now >= nextEventScan) {
-      eventList = scanEvents(now);
       try {
         const zoom = Number(localStorage.getItem('soda-sa-zoom'));
         eventZoom = zoom >= 0.8 && zoom <= 2 ? zoom : 1;
       } catch { /* 使用最近一次读到的缩放。 */ }
+      eventList = scanEvents(now, Number.isInteger(level) && level < options.pickupBefore);
       nextEventScan = now + eventScanInterval;
     }
-    const fresh = eventList.find(event => event.type !== 2 || now >= retryMerchantAt);
+    const fresh = eventList.find(event => !eventTypes[event.type].merchant || now >= retryMerchantAt);
     const tracked = eventPlan?.target;
+    const mapShrineHold = tracked?.fromMap && !eventList.some(event => event.type === shrineType)
+      && tracked.distance <= 77 * eventZoom && now - (eventPlan.arrivedAt ?? tracked.seenAt) < 3300;
     const keepTracking = tracked && eventPlan.arrivedAt === null && now - tracked.seenAt <= eventTrackTimeout
       && (tracked.arrow || tracked.distance > eventTypes[tracked.type].stop * eventZoom + 20);
-    const target = keepTracking && (!fresh || tracked.type < fresh.type) ? tracked : fresh;
+    const target = (keepTracking || mapShrineHold) && (!fresh || tracked.type < fresh.type) ? tracked : fresh;
     if (!target) {
       stopEvent();
-      show('监测红圈和事件');
+      if (!stepPickup(data, now, level)) show('监测红圈和事件');
       return;
     }
+    stopPickup();
     if (eventPlan?.target.type !== target.type || eventPlan.target.arrow !== target.arrow) {
       stopEvent();
       eventPlan = { target, direction: null, checkedAt: now, distance: target.distance, arrivedAt: null, skipped: new Set() };
@@ -715,12 +902,12 @@
     const eventType = eventTypes[target.type];
     const stopRadius = eventType.stop * eventZoom;
     const arrivalLimit = stopRadius + (eventPlan.arrivedAt === null ? 0 : 7 * eventZoom);
-    if (!target.arrow && target.distance <= arrivalLimit) {
+    if (!target.arrow && (target.distance <= arrivalLimit || (target === tracked && mapShrineHold))) {
       releaseMovement();
       eventPlan.arrivedAt ??= now;
       show(eventType.action);
       // 石币不足时交易进度会归零，稍后再尝试。
-      if (target.type === 2 && now - eventPlan.arrivedAt > 3800) {
+      if (eventType.merchant && now - eventPlan.arrivedAt > 3800) {
         retryMerchantAt = now + 5000;
         stopEvent();
         show('商人稍后再试');
@@ -813,7 +1000,7 @@
         stepDodge(data, now);
       } else if (!dodge || ++dodge.clear >= 3) {
         stopDodge();
-        if (!stepCapture(hud, now)) stepEvent(data, now);
+        if (!stepCapture(hud, now)) stepEvent(data, now, hud);
       } else {
         drive(dodge.direction);
       }
