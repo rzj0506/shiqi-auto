@@ -2,8 +2,8 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.9.0
-// @description  副本内自动躲红圈、首领和怪物，支持事件、按本局等级拾取、收尾磁石、捕捉和重复战斗。
+// @version      0.10.0
+// @description  副本内自动闪避、拾取、抓宠及处理事件，支持指定地图重复战斗和自动开荒。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
 // @supportURL   https://github.com/rzj0506/shiqi-auto/issues
@@ -73,14 +73,27 @@
 
   const settingsKey = 'sa-survivors-local-helper.settings';
   const slotKeys = ['z', 'x', 'c'];
-  const options = { magnet: false, magnetSlot: '', capture: false, rate: 60, repeat: false, pickupBefore: 0, avoidMonsters: true };
+  const maps = [
+    ['sainasu', '薩村內', '萨村内'], ['turtle', '龜洞', '龟洞'], ['sea', '海洞'], ['elephant', '大象區', '大象区'],
+    ['ruri', '琉璃'], ['hekisei', '碧青'], ['shinku', '深紅', '深红'], ['genou', '玄黃', '玄黄'], ['shikkoku', '漆黑'],
+    ['sajif', '沙己夫'], ['stonel', '史東爾', '史东尔'], ['wreck', '沉船'], ['deepsea', '深海通道'], ['icesea', '流冰'],
+  ].map(([id, nativeName, label], index) => ({ id, nativeName, label: label ?? nativeName, number: index + 1, chapter: index < 9 ? 0 : 1 }));
+  const difficultyLevels = Array.from({ length: 19 }, (_, index) => 100 + 50 * index);
+  const options = {
+    magnet: false, magnetSlot: '', capture: false, rate: 60, pickupBefore: 0, avoidMonsters: true,
+    battleMode: 'off', battleMap: '', battleDifficulty: '',
+  };
   let position = { x: 12, y: 86 };
   function validNumber(value, maximum) {
     return Number.isInteger(value) && value >= 0 && value <= maximum;
   }
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
-    for (const name of ['magnet', 'capture', 'repeat']) options[name] = saved?.[name] === true;
+    for (const name of ['magnet', 'capture']) options[name] = saved?.[name] === true;
+    options.battleMode = ['off', 'repeat', 'frontier'].includes(saved?.battleMode)
+      ? saved.battleMode : saved?.repeat === true ? 'repeat' : 'off';
+    if (maps.some(map => map.id === saved?.battleMap)) options.battleMap = saved.battleMap;
+    if (difficultyLevels.includes(Number(saved?.battleDifficulty))) options.battleDifficulty = String(saved.battleDifficulty);
     options.avoidMonsters = saved?.avoidMonsters !== false;
     if (slotKeys.includes(saved?.magnetSlot)) options.magnetSlot = saved.magnetSlot;
     if (validNumber(saved?.rate, 100)) options.rate = saved.rate;
@@ -140,6 +153,7 @@
       .hint { display: block; margin-top: 3px; color: #c5b8a3; font-size: 11px; }
       .switch { width: 18px; height: 18px; flex: 0 0 auto; margin: 2px; accent-color: #f2bc66; cursor: pointer; }
       .control { min-height: 29px; border: 1px solid #78684f; border-radius: 5px; background: #18150f; padding: 3px 6px; }
+      .run-config .control { max-width: 150px; }
       input[type="number"] { width: 63px; }
       .unit { display: flex; align-items: center; gap: 4px; }
       #toggle {
@@ -184,8 +198,18 @@
           <span class="unit"><input class="control" id="rate" type="number" min="0" max="100" step="1">%</span>
         </label>
       </div>
-      <div class="section">
-        <label class="row" for="repeat"><span>结算后再来一局</span><input class="switch" id="repeat" type="checkbox"></label>
+      <div class="section run-config">
+        <label class="row" for="battleMode">
+          <span>战斗模式</span>
+          <select class="control" id="battleMode">
+            <option value="off">手动出发</option><option value="repeat">重复战斗</option><option value="frontier">自动开荒</option>
+          </select>
+        </label>
+        <div id="battle-details" hidden>
+          <label class="row subrow" for="battleMap"><span>地图</span><select class="control" id="battleMap"></select></label>
+          <label class="row subrow" for="battleDifficulty"><span id="difficulty-label">难度</span><select class="control" id="battleDifficulty"></select></label>
+          <small id="frontier-hint" class="hint" hidden>通关升一档，倒下退一档。</small>
+        </div>
       </div>
     </div>
   `;
@@ -219,9 +243,19 @@
   function refreshSettings() {
     shadow.querySelector('#magnet-details').hidden = !options.magnet;
     shadow.querySelector('#capture-details').hidden = !options.capture;
+    shadow.querySelector('#battle-details').hidden = options.battleMode === 'off';
+    shadow.querySelector('#frontier-hint').hidden = options.battleMode !== 'frontier';
+    shadow.querySelector('#difficulty-label').textContent = options.battleMode === 'frontier' ? '起始难度' : '难度';
   }
 
-  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'repeat', 'pickupBefore', 'avoidMonsters']) {
+  const mapSelect = shadow.querySelector('#battleMap');
+  mapSelect.add(new Option('沿用当前地图', ''));
+  for (const map of maps) mapSelect.add(new Option(map.number + '. ' + map.label, map.id));
+  const difficultySelect = shadow.querySelector('#battleDifficulty');
+  difficultySelect.add(new Option('沿用当前所选', ''));
+  for (const level of difficultyLevels) difficultySelect.add(new Option(level + '%', String(level)));
+
+  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'pickupBefore', 'avoidMonsters', 'battleMode', 'battleMap', 'battleDifficulty']) {
     const input = shadow.getElementById(field);
     if (input.type === 'checkbox') input.checked = options[field];
     else input.value = options[field];
@@ -231,6 +265,7 @@
         if (validNumber(input.valueAsNumber, Number(input.max))) options[field] = input.valueAsNumber;
         input.value = String(options[field]);
       } else options[field] = input.value;
+      if (field.startsWith('battle')) resetRunRouting();
       refreshSettings();
       persistOptions();
     });
@@ -299,9 +334,60 @@
     return x + half - gameContext.measureText(missingPrefix).width;
   }
 
+  function menuPoint(gameContext, x, y) {
+    const transform = gameContext.getTransform();
+    return {
+      x: transform.a * x + transform.c * y + transform.e,
+      y: transform.b * x + transform.d * y + transform.f,
+      scale: Math.hypot(transform.a, transform.b),
+    };
+  }
+
+  function observeRouteHud(hud, gameContext, text, x, y) {
+    const route = hud.route;
+    const color = String(gameContext.fillStyle).toLowerCase();
+    if (text.includes('要去哪裡練功') && x === 400 && y >= 46 && y <= 55) {
+      route.list = true;
+    } else if (text === '出發') {
+      route.village = true;
+    } else if (text === '出發！' && x >= 315 && x <= 335 && y >= 490 && y <= 515) {
+      route.launch = menuPoint(gameContext, x, y);
+    } else if (text === '取消' && x >= 465 && x <= 485 && y >= 490 && y <= 515) {
+      route.cancel = menuPoint(gameContext, x, y);
+    } else if ((text === '第一部' || text.startsWith('第二部')) && y >= 65 && y <= 76) {
+      route.chapters[text === '第一部' ? 0 : 1] = { point: menuPoint(gameContext, x, y + 6), locked: text.includes('未開') };
+    } else if (y >= 141 && y <= 159 && (text === '◀' || text === '▶') && x >= 636 && x <= 687) {
+      route.pages[text] = menuPoint(gameContext, x, y);
+    } else if (text === '✔自訂' && x >= 135 && x <= 185 && y >= 152 && y <= 174) {
+      route.custom = true;
+    } else if (text.startsWith('組隊出發：') || text.startsWith('組隊中：只有隊長') || text.startsWith('組隊：全隊用')) {
+      route.party = true;
+    } else if (x === 400 && y >= 46 && y <= 66 && (text === '勝利！' || text.startsWith('倒下了'))) {
+      hud.outcome = text === '勝利！' ? 'win' : 'loss';
+    } else if (x === 400 && y >= 85 && y <= 92) {
+      const map = maps.find(entry => entry.nativeName === text);
+      if (map) route.map = map.id;
+    } else if (y >= 145 && y <= 154 && x >= 200 && x <= 615 && /^\d{3,4}%$/.test(text)) {
+      const index = difficultyLevels.indexOf(Number(text.slice(0, -1)));
+      if (index >= 0) route.difficulties.set(index, {
+        point: menuPoint(gameContext, x, y),
+        locked: color === '#777766' || color === '#776' || color === '#6e5236',
+      });
+    } else if (y >= 115 && y <= 411 && x >= 56 && x <= 595 && /\S/.test(text)) {
+      const title = text.match(/^(?:(\d{1,2})[.．]\s*|[.．]\s*)(.+)$/);
+      if (!title) return;
+      const map = maps.find(entry => entry.nativeName === title[2] && (!title[1] || entry.number === Number(title[1])));
+      if (map) route.cards.set(map.id, {
+        point: menuPoint(gameContext, x + 36, y + 14),
+        locked: color === '#888877' || color === '#887' || color === '#6e5236',
+      });
+    }
+  }
+
   const merchantSubtitle = '站 2 秒：60 石幣換一次升級';
   function observeHudText(hud, canvas, gameContext, raw, x, y) {
     const text = raw.trim();
+    if (options.battleMode !== 'off') observeRouteHud(hud, gameContext, text, x, y);
     if ((text === '暫停' || text === '暂停') && x >= 54 && x <= 72 && y >= 34 && y <= 62) {
       hud.paused = true;
     } else if (text.startsWith('打字中：遊戲暫停') && y >= 460 && y <= 480) {
@@ -331,6 +417,7 @@
       hud.repeat = /^(#fff|#ffffff)$/.test(gameContext.fillStyle);
     } else if (text === '回到村莊' && y >= 537 && y <= 546) {
       hud.result = true;
+      hud.returnToVillage = menuPoint(gameContext, x, y);
     } else if (text.startsWith('捕捉中') && y >= 223 && y <= 240) {
       hud.capturing = true;
     } else if (y >= 551 && y <= 559 && Math.abs(canvas.width / gameContext.getTransform().a - x - 62) < 70) {
@@ -380,7 +467,10 @@
       const clearRect = function (x, y, width, height) {
         const result = clear.apply(this, arguments);
         if (x === 0 && y === 0 && width >= canvas.width && height >= canvas.height) {
-          const current = hud = { at: performance.now(), stock: [], merchants: [], petArrows: [], pets: [] };
+          const current = hud = {
+            at: performance.now(), stock: [], merchants: [], petArrows: [], pets: [],
+            route: { chapters: [], pages: {}, difficulties: new Map(), cards: new Map() },
+          };
           // 等这轮画布绘制结束后再读图。游戏后台 Worker 绘制的帧同样会到这里。
           queueMicrotask(() => {
             if (enabled && hudObserver?.latest() === current) runBattleFrame(performance.now(), current);
@@ -808,7 +898,7 @@
   let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
   let battleMap = null, nextMapScan = 0, pickupPlan = null, pickupBlockedUntil = 0, monsterPlan = null;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0, petPlan = null;
-  let resultSince = null, repeatSent = false;
+  let resultSince = null, repeatSent = false, runRoute = null, menuAction = null, frontierStarted = false;
 
   function show(status) {
     if (status === lastStatus) return;
@@ -942,19 +1032,191 @@
     return true;
   }
 
-  function stepRepeat(hud, now) {
-    if (!options.repeat || !hud?.result || !hud.repeat) {
-      resultSince = null;
-      return false;
+  function readLastDeparture() {
+    try {
+      const match = (localStorage.getItem('soda-sa-lastzone') ?? '').match(/^([a-z]+)\|(\d{1,2})$/);
+      if (match && maps.some(map => map.id === match[1]) && Number(match[2]) < difficultyLevels.length) {
+        return { map: match[1], index: Number(match[2]) };
+      }
+    } catch { /* 游戏未保存上次出发选择。 */ }
+    return null;
+  }
+
+  function resetRunRouting() {
+    resultSince = null;
+    repeatSent = false;
+    runRoute = null;
+    menuAction = null;
+    frontierStarted = false;
+  }
+
+  function pressCanvasButton(point) {
+    const canvas = hudObserver?.canvas, stage = canvas?.closest('.stage');
+    if (!point || !stage || !canvas.width || !canvas.height) return;
+    const bounds = stage.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const event = {
+      clientX: bounds.left + point.x / canvas.width * bounds.width,
+      clientY: bounds.top + point.y / canvas.height * bounds.height,
+      pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, bubbles: true, cancelable: true,
+    };
+    stage.dispatchEvent(new PointerEvent('pointerdown', { ...event, buttons: 1 }));
+    stage.dispatchEvent(new PointerEvent('pointerup', { ...event, buttons: 0 }));
+  }
+
+  function selectMenu(key, now, status, action) {
+    if (menuAction?.key !== key) menuAction = { key, count: 0, next: now + 180 };
+    if (menuAction.count >= 4) {
+      show('游戏菜单未响应 · ' + status);
+      return;
     }
+    show(status);
+    if (now < menuAction.next) return;
+    menuAction.count++;
+    menuAction.next = now + 650;
+    action();
+  }
+
+  function selectedDifficulty(point) {
+    const gameContext = hudObserver?.context;
+    if (!gameContext || !point.scale) return false;
+    let orange = 0;
+    for (const [dx, dy] of [[-17, -9], [-17, 8], [17, 8]]) {
+      const [r, g, b] = gameContext.getImageData(Math.round(point.x + dx * point.scale),
+        Math.round(point.y + dy * point.scale), 1, 1).data;
+      if (r >= 128 && r - g >= 37 && g - b >= 25 && b < 105) orange++;
+    }
+    return orange >= 2;
+  }
+
+  function stepRunResult(hud, now) {
     resetBattleTracking();
     resultSince ??= now;
-    if (!repeatSent && now - resultSince >= 900) {
+    if (repeatSent || now - resultSince < 900) {
+      show(repeatSent ? '已请求再来一局' : '等待结算完成');
+      return true;
+    }
+    if (runRoute?.returning) {
+      selectMenu('return', now, '回村选择地图和难度', () => pressCanvasButton(hud.returnToVillage));
+      return true;
+    }
+    const last = readLastDeparture();
+    const fixed = difficultyLevels.indexOf(Number(options.battleDifficulty));
+    const map = options.battleMap || last?.map;
+    const frontier = options.battleMode === 'frontier';
+    if (frontier && !hud.outcome) {
+      show('等待确认通关结果');
+      return true;
+    }
+    if (frontier && !map) {
+      show('请先从地图界面出发一局');
+      return true;
+    }
+
+    let index = fixed >= 0 ? fixed : (last?.map === map ? last?.index : null);
+    let fallback = null;
+    const sameMap = Boolean(last && last.map === map);
+    if (frontier && sameMap && (frontierStarted || fixed < 0 || last.index === fixed)) {
+      const step = hud.outcome === 'win' ? 1 : -1;
+      index = Math.min(difficultyLevels.length - 1, Math.max(0, last.index + step));
+      if (step > 0 && index > last.index) fallback = last.index;
+      frontierStarted = true;
+    }
+
+    if ((!frontier && !options.battleMap && fixed < 0) || (sameMap && last.index === index)) {
       repeatSent = true;
       tap('Enter');
+      show('已请求再来一局');
+      return true;
     }
-    show(repeatSent ? '已请求再来一局' : '等待再来一局');
+    if (!map) {
+      show('请先选择地图');
+      return true;
+    }
+    runRoute = { map, index, fallback, returning: true };
+    selectMenu('return', now, '回村选择地图和难度', () => pressCanvasButton(hud.returnToVillage));
     return true;
+  }
+
+  function stepDeparture(route, now) {
+    if (route.party) {
+      show('等待进入单人出发界面');
+      return true;
+    }
+    if (!runRoute) {
+      const last = readLastDeparture();
+      const fixed = difficultyLevels.indexOf(Number(options.battleDifficulty));
+      if (options.battleMode === 'repeat' && !options.battleMap && fixed < 0) return false;
+      const map = options.battleMap || route.map || last?.map;
+      if (!map) return false;
+      runRoute = { map, index: fixed >= 0 ? fixed : null, fallback: null };
+    }
+    runRoute.returning = false;
+    if (!route.list && !route.launch) {
+      selectMenu('depart', now, '打开地图列表', () => tap('g'));
+      return true;
+    }
+    const wanted = maps.find(map => map.id === runRoute.map);
+    if (route.launch && route.map !== wanted.id) {
+      if (route.cancel) selectMenu('cancel', now, '切换地图 · ' + wanted.label, () => pressCanvasButton(route.cancel));
+      return true;
+    }
+    if (!route.launch) {
+      const card = route.cards.get(wanted.id);
+      if (card?.locked || (!card && route.chapters[wanted.chapter]?.locked)) {
+        show(wanted.label + '尚未开放');
+      } else if (card) {
+        selectMenu('map:' + wanted.id, now, '选择地图 · ' + wanted.label, () => pressCanvasButton(card.point));
+      } else if (route.chapters[wanted.chapter]) {
+        selectMenu('chapter:' + wanted.chapter, now, '切换地图章节', () => pressCanvasButton(route.chapters[wanted.chapter].point));
+      }
+      return true;
+    }
+
+    const available = [...route.difficulties.keys()].sort((a, b) => a - b);
+    if (!available.length) return true;
+    if (runRoute.index == null) {
+      const last = readLastDeparture();
+      runRoute.index = available.find(index => selectedDifficulty(route.difficulties.get(index).point))
+        ?? (last?.map === wanted.id ? last.index : available.find(index => !route.difficulties.get(index).locked));
+    }
+    const index = runRoute.index;
+    if (index == null) {
+      if (route.pages['◀']) selectMenu('lower-page', now, '查找已解锁的难度', () => pressCanvasButton(route.pages['◀']));
+      return true;
+    }
+    const detail = route.difficulties.get(index);
+    const label = wanted.label + ' ' + difficultyLevels[index] + '%';
+    if (!detail) {
+      const arrow = index < available[0] ? '◀' : '▶';
+      if (route.pages[arrow]) selectMenu('page:' + available[0] + ':' + arrow, now, '查找难度 · ' + label, () => pressCanvasButton(route.pages[arrow]));
+    } else if (detail.locked) {
+      runRoute.lockedAt ??= now;
+      if (runRoute.fallback != null && now - runRoute.lockedAt >= 2400) {
+        runRoute.index = runRoute.fallback;
+        runRoute.fallback = null;
+        runRoute.lockedAt = null;
+      }
+      show('难度尚未解锁 · ' + label);
+    } else if (route.custom || !selectedDifficulty(detail.point)) {
+      selectMenu('difficulty:' + index, now, '选择难度 · ' + label, () => pressCanvasButton(detail.point));
+    } else {
+      if (options.battleMode === 'frontier') frontierStarted = true;
+      selectMenu('launch:' + wanted.id + ':' + index, now, '出发 · ' + label, () => pressCanvasButton(route.launch));
+    }
+    return true;
+  }
+
+  function stepBattleMenu(hud, now) {
+    if (options.battleMode === 'off' || !hud) return false;
+    if (hud.result && hud.repeat) return stepRunResult(hud, now);
+    resultSince = null;
+    const route = hud.route;
+    if (route.list || route.launch || (route.village && !hud.level)) {
+      resetBattleTracking();
+      return stepDeparture(route, now);
+    }
+    return false;
   }
 
   function monsterCrossingRisk(direction, stride, threats) {
@@ -1289,7 +1551,7 @@
       return;
     }
     try {
-      if (stepRepeat(hud, now)) return;
+      if (stepBattleMenu(hud, now)) return;
       if (stepLoot(hud)) {
         captureCandidate = null;
         return;
@@ -1302,6 +1564,8 @@
         return;
       }
       repeatSent = false;
+      runRoute = null;
+      menuAction = null;
       // 看见下一轮正常战斗后，才允许再次使用磁石。
       if (hud) magnetUsed = false;
       scanBattleMap(document.querySelector('canvas#overlay'), now, hud?.level);
@@ -1338,6 +1602,7 @@
     resetBattleTracking();
     captureCandidate = null;
     resultSince = null;
+    menuAction = null;
     if (enabled) watchGameCanvas();
     else stopHudObserver();
     show(enabled ? '等待战斗画面' : '已暂停');
