@@ -2,8 +2,8 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.7.0
-// @description  副本内自动闪避、处理事件，支持按本局等级拾取、收尾磁石、捕捉和重复战斗。
+// @version      0.8.0
+// @description  副本内自动躲红圈、首领和怪物，支持事件、按本局等级拾取、收尾磁石、捕捉和重复战斗。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
 // @supportURL   https://github.com/rzj0506/shiqi-auto/issues
@@ -73,7 +73,7 @@
 
   const settingsKey = 'sa-survivors-local-helper.settings';
   const slotKeys = ['z', 'x', 'c'];
-  const options = { magnet: false, magnetSlot: '', capture: false, rate: 60, repeat: false, pickupBefore: 0 };
+  const options = { magnet: false, magnetSlot: '', capture: false, rate: 60, repeat: false, pickupBefore: 0, avoidMonsters: true };
   let position = { x: 12, y: 86 };
   function validNumber(value, maximum) {
     return Number.isInteger(value) && value >= 0 && value <= maximum;
@@ -81,6 +81,7 @@
   try {
     const saved = JSON.parse(localStorage.getItem(settingsKey) || '{}');
     for (const name of ['magnet', 'capture', 'repeat']) options[name] = saved?.[name] === true;
+    options.avoidMonsters = saved?.avoidMonsters !== false;
     if (slotKeys.includes(saved?.magnetSlot)) options.magnetSlot = saved.magnetSlot;
     if (validNumber(saved?.rate, 100)) options.rate = saved.rate;
     if (validNumber(saved?.pickupBefore, 999)) options.pickupBefore = saved.pickupBefore;
@@ -157,6 +158,10 @@
         <button id="toggle" type="button" aria-pressed="false">启动</button>
       </div>
       <div class="section">
+        <label class="row" for="avoidMonsters"><span>自动躲避首领和怪物</span><input class="switch" id="avoidMonsters" type="checkbox"></label>
+        <small class="hint">需开启战斗小地图（N）</small>
+      </div>
+      <div class="section">
         <label class="row" for="magnet"><span>打完首领后使用磁石</span><input class="switch" id="magnet" type="checkbox"></label>
         <label class="row subrow" id="magnet-details" for="magnetSlot">
           <span>磁石所在快捷栏</span>
@@ -216,7 +221,7 @@
     shadow.querySelector('#capture-details').hidden = !options.capture;
   }
 
-  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'repeat', 'pickupBefore']) {
+  for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'repeat', 'pickupBefore', 'avoidMonsters']) {
     const input = shadow.getElementById(field);
     if (input.type === 'checkbox') input.checked = options[field];
     else input.value = options[field];
@@ -560,6 +565,103 @@
   const mapAxes = [[1, 0], [-1, 0], [0, 1], [0, -1]];
   const mapCorners = [[2, 2], [2, -2], [-2, 2], [-2, -2]];
   const mapItemOutline = [0, 0, 0];
+  const mapVoid = [20, 14, 8];
+  const bossMarkerColor = [255, 74, 58];
+  const eliteMarkerColor = [255, 176, 80];
+  const threatTypes = [
+    { name: '躲避首领', near: 235, clear: 305, weight: 3.5 },
+    { name: '躲避精英', near: 170, clear: 220, weight: 1.8 },
+    { name: '躲避怪物', near: 145, clear: 185, weight: 1 },
+  ];
+
+  function isMapGear(data, width, x, y, color) {
+    const match = (rgb, dx, dy, tolerance) => eventColor(data, ((y + dy) * width + x + dx) * 4, rgb, tolerance);
+    return mapCorners.filter(([dx, dy]) => match(color, dx, dy, 35)).length >= 3
+      && mapAxes.filter(([dx, dy]) => match(mapItemOutline, dx * 3, dy * 3, 76)
+        || match(mapItemOutline, dx * 4, dy * 4, 76)).length >= 3;
+  }
+
+  function findMapThreats(data, width, playerX, playerY) {
+    const reach = 23, side = reach * 2 + 1;
+    const originX = playerX - reach, originY = playerY - reach;
+    const mask = new Uint8Array(side * side);
+    for (let y = 0; y < side; y++) {
+      for (let x = 0; x < side; x++) {
+        const offset = ((originY + y) * width + originX + x) * 4;
+        if (data[offset + 3] < 125) continue;
+        const index = y * side + x;
+        if (eventColor(data, offset, bossMarkerColor, 11)) mask[index] = 1;
+        else if (eventColor(data, offset, eliteMarkerColor, 10)) mask[index] = 2;
+        else {
+          // 普通怪是半透明小红点，地形改变底色，但保留通道差。
+          const red = data[offset], green = data[offset + 1], blue = data[offset + 2];
+          if (red >= 151 && red - green >= 68 && red - green <= 135
+            && green - blue >= 8 && green - blue <= 29) mask[index] = 3;
+        }
+      }
+    }
+
+    const threats = [];
+    for (let point = 0; point < mask.length; point++) {
+      const kind = mask[point] - 1;
+      if (kind < 0) continue;
+      const group = [point];
+      mask[point] = 0;
+      let sx = 0, sy = 0, left = side, right = 0, top = side, bottom = 0;
+      for (let i = 0; i < group.length; i++) {
+        const x = group[i] % side, y = Math.floor(group[i] / side);
+        sx += x;
+        sy += y;
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+        for (const [dx, dy] of mapAxes) {
+          const nx = x + dx, ny = y + dy, next = ny * side + nx;
+          if (nx < 0 || ny < 0 || nx >= side || ny >= side || mask[next] !== kind + 1) continue;
+          mask[next] = 0;
+          group.push(next);
+        }
+      }
+      if (kind === 0 && group.length < 5) continue;
+      const centerX = sx / group.length, centerY = sy / group.length;
+      if (kind === 1) {
+        // 精英是橙色圆点。排除同色装备方块和尺寸更大的任务星标。
+        if (group.length < 7 || right - left > 5 || bottom - top > 5) continue;
+        if (isMapGear(data, width, originX + Math.round(centerX), originY + Math.round(centerY), eliteMarkerColor)) continue;
+        let outline = 0;
+        for (let y = originY + top - 3; y <= originY + bottom + 3; y++) {
+          for (let x = originX + left - 3; x <= originX + right + 3; x++) {
+            if (Math.hypot(x + 0.5 - playerX, y + 0.5 - playerY) <= 5.6) continue;
+            const offset = (y * width + x) * 4;
+            if (data[offset + 3] < 225) continue;
+            if (eventColor(data, offset, mapItemOutline, 14)
+              || eventColor(data, offset, mapPlayerOutline, 18)) outline++;
+          }
+        }
+        if (outline >= 3) continue;
+      }
+      const x = (centerX - reach + 0.5) * mapWorldScale, y = (centerY - reach + 0.5) * mapWorldScale;
+      const distance = Math.hypot(x, y / 0.85);
+      if (distance > 470) continue;
+      const crowd = kind === 2 ? Math.min(2.5, Math.max(1, group.length / 4)) : 1;
+      threats.push({ kind, x, y, distance, weight: threatTypes[kind].weight * crowd });
+    }
+    return threats.sort((a, b) => a.kind - b.kind || a.distance - b.distance).slice(0, 20);
+  }
+
+  function mapRouteBlocks(data, width, playerX, playerY) {
+    return directions.map(direction => {
+      let blocks = 0;
+      for (const distance of [68, 112, 156]) {
+        const x = Math.round(playerX + direction.x * distance / mapWorldScale);
+        const y = Math.round(playerY + direction.y * distance / mapWorldScale);
+        const dark = mapAxes.filter(([dx, dy]) => eventColor(data, ((y + dy) * width + x + dx) * 4, mapVoid, 13)).length;
+        if (dark >= 3) blocks++;
+      }
+      return blocks;
+    });
+  }
 
   function findMapShrine(data, width, height, playerX, playerY) {
     const mask = new Uint8Array(width * height);
@@ -607,7 +709,9 @@
     if (playerY === undefined) return null;
     const shrine = findMapShrine(data, width, height, playerX, playerY);
     const pickups = [];
-    if (!pickupAllowed) return { shrine, pickups };
+    const threats = options.avoidMonsters ? findMapThreats(data, width, playerX, playerY) : [];
+    const blocked = threats.length ? mapRouteBlocks(data, width, playerX, playerY) : [];
+    if (!pickupAllowed) return { shrine, pickups, threats, blocked };
     // 小地图用有黑边的方块画装备，用小圆点画素材、肉和石币。
     const reach = 24;
     for (let y = playerY - reach; y <= playerY + reach; y++) {
@@ -616,10 +720,8 @@
         if (distance > reach || distance < 5) continue;
         const p = pixel(x, y);
         const square = mapItemColors.find(color => eventColor(data, p, color, 9));
-        const match = (color, dx, dy, tolerance = 9) => eventColor(data, pixel(x + dx, y + dy), color, tolerance);
-        const gear = square && mapCorners.filter(([dx, dy]) => match(square, dx, dy, 35)).length >= 3
-          && mapAxes.filter(([dx, dy]) => match(mapItemOutline, dx * 3, dy * 3, 76)
-            || match(mapItemOutline, dx * 4, dy * 4, 76)).length >= 3;
+        const match = (color, dx, dy) => eventColor(data, pixel(x + dx, y + dy), color, 9);
+        const gear = square && isMapGear(data, width, x, y, square);
         const dot = mapLootDots.find(color => eventColor(data, p, color, 9));
         const smallDrop = dot && mapAxes.every(([dx, dy]) => match(dot, dx, dy))
           && mapAxes.filter(([dx, dy]) => match(dot, dx * 3, dy * 3)).length <= 1;
@@ -628,13 +730,23 @@
       }
     }
     pickups.sort((a, b) => a.distance - b.distance);
-    return { shrine, pickups };
+    return { shrine, pickups, threats, blocked };
   }
 
-  function scanEvents(now, pickupAllowed) {
-    const overlay = document.querySelector('canvas#overlay');
+  function scanBattleMap(overlay, now, level) {
+    if (now < nextMapScan) return;
+    const pickupAllowed = Number.isInteger(level) && level < options.pickupBefore;
     battleMap = overlay?.width && overlay.height ? readBattleMap(overlay, pickupAllowed) : null;
     if (battleMap) battleMap.at = now;
+    try {
+      const zoom = Number(localStorage.getItem('soda-sa-zoom'));
+      eventZoom = zoom >= 0.8 && zoom <= 2 ? zoom : 1;
+    } catch { /* 使用最近一次读到的缩放。 */ }
+    nextMapScan = now + (options.avoidMonsters ? 65 : eventScanInterval);
+  }
+
+  function scanEvents(now) {
+    const overlay = document.querySelector('canvas#overlay');
     if (!eventContext || !overlay?.width || !overlay.height) return [];
     const width = Math.round(overlay.width / overlay.height * 300), height = 300;
     if (width < 100 || width > 1000) return [];
@@ -660,7 +772,7 @@
   let enabled = false, dodge = null, heldKeys = [], movementTimer = null, lastSample = -Infinity;
   let lastStatus = '';
   let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
-  let battleMap = null, pickupPlan = null, pickupBlockedUntil = 0;
+  let battleMap = null, nextMapScan = 0, pickupPlan = null, pickupBlockedUntil = 0, monsterPlan = null;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0;
   let resultSince = null, repeatSent = false;
 
@@ -716,6 +828,11 @@
     dodge = null;
   }
 
+  function stopMonsterAvoidance() {
+    if (monsterPlan) releaseMovement();
+    monsterPlan = null;
+  }
+
   function stopEvent() {
     if (eventPlan) releaseMovement();
     eventPlan = null;
@@ -731,14 +848,20 @@
     stopPickup();
     eventList = [];
     nextEventScan = 0;
-    battleMap = null;
     pickupBlockedUntil = 0;
+  }
+
+  function resetBattleTracking() {
+    stopDodge();
+    stopMonsterAvoidance();
+    resetEvents();
+    battleMap = null;
+    nextMapScan = 0;
   }
 
   function stepLoot(hud) {
     if (!hud?.loot) return false;
-    stopDodge();
-    resetEvents();
+    resetBattleTracking();
     const slot = slotKeys.indexOf(options.magnetSlot);
     if (options.magnet && !magnetUsed && hud.stock[slot] > 0) {
       magnetUsed = true;
@@ -782,14 +905,79 @@
       resultSince = null;
       return false;
     }
-    stopDodge();
-    resetEvents();
+    resetBattleTracking();
     resultSince ??= now;
     if (!repeatSent && now - resultSince >= 900) {
       repeatSent = true;
       tap('Enter');
     }
     show(repeatSent ? '已请求再来一局' : '等待再来一局');
+    return true;
+  }
+
+  function monsterCrossingRisk(direction, stride, threats) {
+    let risk = 0;
+    for (const threat of threats) {
+      const y = threat.y / 0.85;
+      const vy = direction.y / 0.85;
+      const along = Math.max(0, Math.min(stride, threat.x * direction.x + y * vy));
+      const closest = Math.hypot(threat.x - direction.x * along, y - vy * along);
+      risk += Math.max(0, Math.min(threat.distance, threatTypes[threat.kind].near) - closest) * threat.weight;
+    }
+    return risk;
+  }
+
+  function stepMonsterAvoidance(data, now) {
+    if (!options.avoidMonsters || !battleMap) {
+      stopMonsterAvoidance();
+      return false;
+    }
+    const threats = battleMap.threats;
+    const nearby = threats.find(threat => threat.distance <= threatTypes[threat.kind][monsterPlan ? 'clear' : 'near']);
+    if (!nearby) {
+      // 敌人标记可能短暂被角色白点盖住，继续走完当前这小段。
+      const last = monsterPlan?.target;
+      const obscured = last && last.distance < 155 && now - monsterPlan.seenAt < 260
+        && !threats.some(threat => threat.kind === last.kind && Math.hypot(threat.x - last.x, threat.y - last.y) < 110);
+      if (obscured && monsterPlan.direction && !warningOnPath(data, monsterPlan.direction, 24)) {
+        drive(monsterPlan.direction);
+        return true;
+      }
+      stopMonsterAvoidance();
+      return false;
+    }
+    if (!monsterPlan) {
+      resetEvents();
+      monsterPlan = { direction: null, target: nearby, seenAt: battleMap.at, checkAt: now };
+    }
+    monsterPlan.target = nearby;
+    monsterPlan.seenAt = battleMap.at;
+    if (now >= monsterPlan.checkAt) {
+      monsterPlan.checkAt = now + 85;
+      let best = null, bestScore = -Infinity;
+      for (const [index, direction] of directions.entries()) {
+        let score = direction === monsterPlan.direction ? 17 : 0;
+        const stride = 125;
+        for (const threat of threats) {
+          const x = threat.x - direction.x * stride, y = threat.y - direction.y * stride;
+          const gain = Math.hypot(x, y / 0.85) - threat.distance;
+          const significance = Math.max(0, 1 - threat.distance / (threatTypes[threat.kind].clear + 105));
+          score += gain * significance * threat.weight;
+        }
+        score -= monsterCrossingRisk(direction, stride, threats) * 1.6;
+        score -= (battleMap.blocked[index] ?? 0) * 92;
+        const reach = Math.min(168, Math.max(66, stride * eventZoom));
+        for (let look = 12; look <= reach; look += 12) {
+          if (warningOnPath(data, direction, look)) score -= look <= 36 ? 180 : 55;
+        }
+        if (score <= bestScore) continue;
+        best = direction;
+        bestScore = score;
+      }
+      monsterPlan.direction = best;
+    }
+    drive(monsterPlan.direction);
+    show(threatTypes[nearby.kind].name + ' ' + monsterPlan.direction.label);
     return true;
   }
 
@@ -802,6 +990,9 @@
       const alignment = (target.x * direction.x + target.y * direction.y) / (length * Math.hypot(direction.x, direction.y));
       if (alignment <= 0.1) continue;
       let score = alignment * 100 + (direction === plan.direction ? 10 : 0);
+      if (options.avoidMonsters && battleMap?.threats.length) {
+        score -= monsterCrossingRisk(direction, Math.max(95, reach / eventZoom), battleMap.threats) * 1.7;
+      }
       for (let distance = 6; distance <= reach; distance += 6) {
         if (!warningOnPath(data, direction, distance)) continue;
         score -= distance <= 24 ? 120 : 24;
@@ -842,7 +1033,9 @@
         // 掉落标记靠近时会被角色白点遮住，走完短距离就重新判断。
         const extra = last.distance <= 205 ? Math.min(680, Math.max(170, (last.distance - 55) * 5)) : 165;
         pickupPlan.finishAt ??= now + extra;
-        if (now < pickupPlan.finishAt && ![12, 24, 36, 48].some(distance => warningOnPath(data, pickupPlan.direction, distance))) {
+        const danger = [12, 24, 36, 48].some(distance => warningOnPath(data, pickupPlan.direction, distance))
+          || (options.avoidMonsters && monsterCrossingRisk(pickupPlan.direction, 110, battleMap.threats) > 12);
+        if (now < pickupPlan.finishAt && !danger) {
           drive(pickupPlan.direction);
           show('靠近掉落物 · 本局 ' + level + ' 级');
           return true;
@@ -874,11 +1067,7 @@
   function stepEvent(data, now, hud) {
     const level = hud?.level;
     if (now >= nextEventScan) {
-      try {
-        const zoom = Number(localStorage.getItem('soda-sa-zoom'));
-        eventZoom = zoom >= 0.8 && zoom <= 2 ? zoom : 1;
-      } catch { /* 使用最近一次读到的缩放。 */ }
-      eventList = scanEvents(now, Number.isInteger(level) && level < options.pickupBefore);
+      eventList = scanEvents(now);
       nextEventScan = now + eventScanInterval;
     }
     const fresh = eventList.find(event => !eventTypes[event.type].merchant || now >= retryMerchantAt);
@@ -940,7 +1129,14 @@
     dodge.clear = 0;
     if (now >= dodge.checkAt) {
       dodge.checkAt = now + 95;
-      const routes = directions.map(direction => assessEscape(data, direction));
+      const routes = directions.map(direction => {
+        const route = assessEscape(data, direction);
+        if (options.avoidMonsters && battleMap?.threats.length) {
+          const risk = monsterCrossingRisk(direction, 110, battleMap.threats);
+          route.score += Math.min(52, risk * 0.5);
+        }
+        return route;
+      });
       const current = routes.find(route => route.direction === dodge.direction);
       if (current && current.exit < dodge.distance) {
         dodge.distance = current.exit;
@@ -971,8 +1167,7 @@
     if (!enabled || now - lastSample < sampleInterval || document.hidden || !document.hasFocus()) return;
     lastSample = now;
     if (document.activeElement?.closest('input, textarea, select, [contenteditable="true"]')) {
-      stopDodge();
-      resetEvents();
+      resetBattleTracking();
       show('等待游戏输入框关闭');
       return;
     }
@@ -985,8 +1180,7 @@
       }
       const data = readBattlePixels();
       if (!data || !hasBattleBar(data)) {
-        stopDodge();
-        resetEvents();
+        resetBattleTracking();
         captureCandidate = null;
         show('等待战斗画面');
         return;
@@ -994,20 +1188,23 @@
       repeatSent = false;
       // 看见下一轮正常战斗后，才允许再次使用磁石。
       if (hud) magnetUsed = false;
+      scanBattleMap(document.querySelector('canvas#overlay'), now, hud?.level);
       if (isDangerUnderfoot(data)) {
         captureCandidate = null;
+        stopMonsterAvoidance();
         resetEvents();
         stepDodge(data, now);
       } else if (!dodge || ++dodge.clear >= 3) {
         stopDodge();
-        if (!stepCapture(hud, now)) stepEvent(data, now, hud);
+        if (stepMonsterAvoidance(data, now)) {
+          captureCandidate = null;
+        } else if (!stepCapture(hud, now)) stepEvent(data, now, hud);
       } else {
         drive(dodge.direction);
       }
     } catch (error) {
       enabled = false;
-      stopDodge();
-      resetEvents();
+      resetBattleTracking();
       stopHudObserver();
       show('读取画面失败');
       console.warn('[石器幸存者助手] 无法读取战斗画布', error);
@@ -1016,8 +1213,7 @@
 
   function toggle() {
     enabled = !enabled;
-    stopDodge();
-    resetEvents();
+    resetBattleTracking();
     captureCandidate = null;
     resultSince = null;
     if (!enabled) stopHudObserver();
@@ -1033,8 +1229,7 @@
     }
   }, true);
   function leavePage() {
-    stopDodge();
-    resetEvents();
+    resetBattleTracking();
     stopHudObserver();
     captureCandidate = null;
     resultSince = null;
