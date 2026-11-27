@@ -2,7 +2,7 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.5.0
+// @version      0.6.0
 // @description  副本内自动闪避、处理事件，支持收尾磁石、按成功率捕捉和重复战斗。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
@@ -21,9 +21,8 @@
   const sampleSize = 193;
   const center = (sampleSize - 1) / 2;
   const step = 2;
-  const sampleInterval = 55;
-  const maxDodgeTime = 1100;
-  const directionRetryTime = 260;
+  const sampleInterval = 29;
+  const movementTimeout = 170;
   const directions = [
     [0, -1, '↑', ['ArrowUp']],
     [1, -1, '↗', ['ArrowUp', 'ArrowRight']],
@@ -47,14 +46,14 @@
 
   const eventSample = document.createElement('canvas');
   const eventContext = eventSample.getContext('2d', { willReadFrequently: true });
-  const eventScanInterval = 160;
-  const eventStopRadius = 32;
+  const eventScanInterval = 100;
+  const eventTrackTimeout = 220;
   // 事件按此顺序处理。地面标记和场外指示箭头分别使用游戏原有的配色。
   const eventTypes = [
-    { name: '挑衅战旗', action: '正在踩战旗', ring: [255, 90, 74] },
-    { name: '受伤的小宠物', action: '正在守护小宠物', ring: [143, 255, 160] },
-    { name: '流浪商人', action: '等待商人交易', ring: [255, 212, 92], arrow: [255, 211, 107] },
-    { name: '赌博石像', action: '等待石像触发', ring: [255, 154, 213], dashed: true },
+    { name: '挑衅战旗', action: '正在踩战旗', ring: [255, 90, 74], stop: 48 },
+    { name: '受伤的小宠物', action: '正在守护小宠物', ring: [143, 255, 160], stop: 38 },
+    { name: '流浪商人', action: '等待商人交易', ring: [255, 212, 92], arrow: [255, 211, 107], stop: 38 },
+    { name: '赌博石像', action: '等待石像触发', ring: [255, 154, 213], dashed: true, stop: 38 },
   ];
   const ringAngles = Array.from({ length: 24 }, (_, i) => {
     const angle = i * Math.PI / 12;
@@ -375,8 +374,8 @@
 
   function isDangerUnderfoot(data) {
     let centerHits = 0, ringHits = 0;
-    for (let y = -4; y <= 4; y += 4) {
-      for (let x = -4; x <= 4; x += 4) {
+    for (let y = -6; y <= 6; y += 6) {
+      for (let x = -6; x <= 6; x += 6) {
         if (warningTint(data, x, y)) centerHits++;
       }
     }
@@ -385,21 +384,28 @@
       const angle = i * Math.PI / 6;
       if (warningTint(data, Math.cos(angle) * 14, Math.sin(angle) * 14)) ringHits++;
     }
-    return (centerHits >= 3 && ringHits >= 4) || ringHits >= 9;
+    return centerHits >= 5 || (centerHits >= 2 && ringHits >= 2) || ringHits >= 8;
   }
 
-  function exitDistance(data, direction) {
-    let clear = 0;
-    for (let distance = 12; distance <= 180; distance += 6) {
-      const x = direction.x * distance, y = direction.y * distance;
-      const sideX = -direction.y * 5, sideY = direction.x * 5;
-      const red = warningTint(data, x, y) || warningTint(data, x + sideX, y + sideY)
-        || warningTint(data, x - sideX, y - sideY);
-      // 连续四个点无红色才算离开，防止把圈内图标和细小缺口识别成出口。
-      clear = red ? 0 : clear + 1;
-      if (clear === 4) return distance;
+  function warningOnPath(data, direction, distance) {
+    const x = direction.x * distance, y = direction.y * distance;
+    const sideX = -direction.y * 6, sideY = direction.x * 6;
+    return warningTint(data, x, y) || warningTint(data, x + sideX, y + sideY)
+      || warningTint(data, x - sideX, y - sideY);
+  }
+
+  function assessEscape(data, direction) {
+    let clear = 0, exit = Infinity, before = 0, after = 0;
+    for (let distance = 6; distance <= 180 && distance <= exit + 42; distance += 6) {
+      if (warningOnPath(data, direction, distance)) {
+        clear = 0;
+        if (exit === Infinity) before++;
+        else after++;
+      } else if (++clear === 4 && exit === Infinity) {
+        exit = distance - 18;
+      }
     }
-    return Infinity;
+    return { direction, exit, score: exit === Infinity ? 270 + before * 3 : exit + after * 12 };
   }
 
   function readBattlePixels() {
@@ -433,7 +439,7 @@
     return { ground, arrows };
   }
 
-  function markerScore(mask, width, height, kind, x, y, rx, ry) {
+  function markerScore(mask, width, height, kind, x, y, rx, ry, minSectors = 3) {
     let hits = 0, sectors = 0;
     for (const [i, [dx, dy]] of ringAngles.entries()) {
       const sx = Math.round(x + dx * rx), sy = Math.round(y + dy * ry);
@@ -445,7 +451,8 @@
         sectors |= 1 << Math.floor(i / 6);
       }
     }
-    return [7, 11, 13, 14, 15].includes(sectors) ? hits : 0;
+    const count = (sectors & 1) + (sectors >> 1 & 1) + (sectors >> 2 & 1) + (sectors >> 3 & 1);
+    return count >= minSectors ? hits : 0;
   }
 
   function findGroundMarkers(mask, width, height) {
@@ -465,15 +472,15 @@
     return votes.map((bucket, type) => {
       const peaks = [];
       for (let point = 0; point < bucket.length; point++) {
-        if (bucket[point] >= (eventTypes[type].dashed ? 5 : 8)) peaks.push(point);
+        if (bucket[point] >= (eventTypes[type].dashed ? 4 : 6)) peaks.push(point);
       }
       peaks.sort((a, b) => bucket[b] - bucket[a]);
-      let best = null, bestScore = eventTypes[type].dashed ? 9 : 15;
+      let best = null, bestScore = eventTypes[type].dashed ? 8 : 11;
       for (const point of peaks.slice(0, 24)) {
         const x = point % gridWidth * bin, y = Math.floor(point / gridWidth) * bin;
         for (let oy = -1; oy <= bin; oy++) {
           for (let ox = -1; ox <= bin; ox++) {
-            const score = markerScore(mask, width, height, type + 1, x + ox, y + oy, rx, ry);
+            const score = markerScore(mask, width, height, type + 1, x + ox, y + oy, rx, ry, 2);
             if (score < bestScore || (best && score === bestScore)) continue;
             best = { x: x + ox, y: y + oy, arrow: false };
             bestScore = score;
@@ -485,15 +492,25 @@
     });
   }
 
+  let arrowCandidateWidth = 0, arrowCandidates = [];
   function findEventArrows(mask, width, height, markers) {
-    const candidates = [];
-    // 游戏将场外事件箭头放在左右 50 或上下 80 单位的边界上。
-    for (let x = 25; x <= width - 25; x += 2) candidates.push([x, 40], [x, height - 40]);
-    for (let y = 40; y <= height - 40; y += 2) candidates.push([25, y], [width - 25, y]);
+    if (arrowCandidateWidth !== width) {
+      arrowCandidateWidth = width;
+      const positions = new Set();
+      // 斜向箭头沿椭圆分布，只有部分会贴着画布边缘。
+      const halfW = width / 2, halfH = height / 2;
+      for (let angle = 0; angle < 2 * Math.PI; angle += 1 / Math.max(halfW, halfH)) {
+        const x = Math.cos(angle), y = Math.sin(angle);
+        const radius = Math.min(halfW - 25, (halfH - 40) / Math.max(0.001, Math.abs(y)));
+        positions.add(Math.round(halfH + y * radius) * width + Math.round(halfW + x * radius));
+      }
+      arrowCandidates = [...positions].map(point => [point % width, Math.floor(point / width)]);
+    }
     return markers.map((marker, type) => {
       if (marker) return marker;
-      let best = null, bestScore = 16;
-      for (const [x, y] of candidates) {
+      if (!mask.includes(type + 1)) return null;
+      let best = null, bestScore = 15;
+      for (const [x, y] of arrowCandidates) {
         const score = markerScore(mask, width, height, type + 1, x, y, 10.35, 10.35);
         if (score < bestScore || (best && score === bestScore)) continue;
         best = { x, y, arrow: true };
@@ -503,7 +520,7 @@
     });
   }
 
-  function scanEvents() {
+  function scanEvents(now) {
     const overlay = document.querySelector('canvas#overlay');
     if (!eventContext || !overlay?.width || !overlay.height) return [];
     const width = Math.round(overlay.width / overlay.height * 300), height = 300;
@@ -519,13 +536,13 @@
     return findEventArrows(arrows, width, height, findGroundMarkers(ground, width, height)).flatMap((mark, type) => {
       if (!mark) return [];
       const x = (mark.x - width / 2 + 0.5) * 2, y = (mark.y - height / 2 + 0.5) * 2;
-      return [{ type, x, y, arrow: mark.arrow, distance: Math.hypot(x, y / 0.75) }];
+      return [{ type, x, y, arrow: mark.arrow, distance: Math.hypot(x, y / 0.75), seenAt: now }];
     });
   }
 
-  let enabled = false, dodge = null, heldKeys = [], releaseTimer = null, lastSample = -Infinity;
+  let enabled = false, dodge = null, heldKeys = [], movementTimer = null, lastSample = -Infinity;
   let lastStatus = '';
-  let eventPlan = null, eventTimer = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0;
+  let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0;
   let resultSince = null, repeatSent = false;
 
@@ -559,17 +576,30 @@
     heldKeys = keys;
   }
 
+  function releaseMovement() {
+    if (movementTimer !== null) window.clearTimeout(movementTimer);
+    movementTimer = null;
+    move([]);
+  }
+
+  function drive(direction) {
+    if (!direction) {
+      releaseMovement();
+      return;
+    }
+    move(direction.keys);
+    // 画面停止更新时松开方向键。正常换帧会续住当前方向。
+    if (movementTimer !== null) window.clearTimeout(movementTimer);
+    movementTimer = window.setTimeout(releaseMovement, movementTimeout);
+  }
+
   function stopDodge() {
-    if (dodge) move([]);
-    if (releaseTimer !== null) window.clearTimeout(releaseTimer);
-    releaseTimer = null;
+    if (dodge) releaseMovement();
     dodge = null;
   }
 
   function stopEvent() {
-    if (eventPlan) move([]);
-    if (eventTimer !== null) window.clearTimeout(eventTimer);
-    eventTimer = null;
+    if (eventPlan) releaseMovement();
     eventPlan = null;
   }
 
@@ -637,17 +667,22 @@
     return true;
   }
 
-  function eventHeading(data, target, skipped) {
+  function eventHeading(data, target, plan, stopRadius) {
     const length = Math.hypot(target.x, target.y);
-    let best = null, bestAlignment = 0.1;
+    const reach = Math.min(78, Math.max(18, target.distance - stopRadius * 0.5));
+    let best = null, bestScore = 0;
     for (const direction of directions) {
-      if (skipped.has(direction)) continue;
+      if (plan.skipped.has(direction)) continue;
       const alignment = (target.x * direction.x + target.y * direction.y) / (length * Math.hypot(direction.x, direction.y));
-      if (alignment <= bestAlignment) continue;
-      const reach = Math.min(36, Math.max(12, length - 20));
-      const redAhead = [0.4, 0.7, 1].some(fraction => warningTint(data, direction.x * reach * fraction, direction.y * reach * fraction));
-      if (redAhead) continue;
-      bestAlignment = alignment;
+      if (alignment <= 0.1) continue;
+      let score = alignment * 100 + (direction === plan.direction ? 10 : 0);
+      for (let distance = 6; distance <= reach; distance += 6) {
+        if (!warningOnPath(data, direction, distance)) continue;
+        score -= distance <= 24 ? 120 : 24;
+        if (score <= bestScore) break;
+      }
+      if (score <= bestScore) continue;
+      bestScore = score;
       best = direction;
     }
     return best;
@@ -655,22 +690,33 @@
 
   function stepEvent(data, now) {
     if (now >= nextEventScan) {
-      eventList = scanEvents();
+      eventList = scanEvents(now);
+      try {
+        const zoom = Number(localStorage.getItem('soda-sa-zoom'));
+        eventZoom = zoom >= 0.8 && zoom <= 2 ? zoom : 1;
+      } catch { /* 使用最近一次读到的缩放。 */ }
       nextEventScan = now + eventScanInterval;
     }
-    const target = eventList.find(event => event.type !== 2 || now >= retryMerchantAt);
+    const fresh = eventList.find(event => event.type !== 2 || now >= retryMerchantAt);
+    const tracked = eventPlan?.target;
+    const keepTracking = tracked && eventPlan.arrivedAt === null && now - tracked.seenAt <= eventTrackTimeout
+      && (tracked.arrow || tracked.distance > eventTypes[tracked.type].stop * eventZoom + 20);
+    const target = keepTracking && (!fresh || tracked.type < fresh.type) ? tracked : fresh;
     if (!target) {
       stopEvent();
       show('监测红圈和事件');
       return;
     }
-    if (eventPlan?.type !== target.type) {
+    if (eventPlan?.target.type !== target.type || eventPlan.target.arrow !== target.arrow) {
       stopEvent();
-      eventPlan = { type: target.type, direction: null, checkedAt: now, distance: target.distance, arrivedAt: null, skipped: new Set() };
+      eventPlan = { target, direction: null, checkedAt: now, distance: target.distance, arrivedAt: null, skipped: new Set() };
     }
+    eventPlan.target = target;
     const eventType = eventTypes[target.type];
-    if (!target.arrow && target.distance < eventStopRadius) {
-      move([]);
+    const stopRadius = eventType.stop * eventZoom;
+    const arrivalLimit = stopRadius + (eventPlan.arrivedAt === null ? 0 : 7 * eventZoom);
+    if (!target.arrow && target.distance <= arrivalLimit) {
+      releaseMovement();
       eventPlan.arrivedAt ??= now;
       show(eventType.action);
       // 石币不足时交易进度会归零，稍后再尝试。
@@ -681,76 +727,56 @@
       }
       return;
     }
+    if (eventPlan.arrivedAt !== null) {
+      eventPlan.checkedAt = now;
+      eventPlan.distance = target.distance;
+      eventPlan.skipped.clear();
+    }
     eventPlan.arrivedAt = null;
-    if (now - eventPlan.checkedAt >= 540) {
+    if (target.seenAt - eventPlan.checkedAt >= 450) {
       if (target.arrow || target.distance <= eventPlan.distance - 7) eventPlan.skipped.clear();
       else if (eventPlan.direction) eventPlan.skipped.add(eventPlan.direction);
       else eventPlan.skipped.clear();
-      eventPlan.checkedAt = now;
+      eventPlan.checkedAt = target.seenAt;
       eventPlan.distance = target.distance;
     }
-    const direction = eventHeading(data, target, eventPlan.skipped);
+    const direction = eventHeading(data, target, eventPlan, stopRadius);
     eventPlan.direction = direction;
-    move(direction?.keys || []);
-    if (eventTimer !== null) window.clearTimeout(eventTimer);
-    eventTimer = direction ? window.setTimeout(() => { eventTimer = null; move([]); }, 220) : null;
+    drive(direction);
     show(direction ? '前往' + eventType.name + ' ' + direction.label : '暂缓接近' + eventType.name);
   }
 
   function stepDodge(data, now) {
     if (!dodge) {
-      dodge = { direction: null, tried: new Set(), distance: Infinity, checkAt: now, clear: 0 };
-      const current = dodge;
-      // 即使渲染循环卡住，移动键也会释放。
-      releaseTimer = window.setTimeout(() => {
-        if (dodge !== current) return;
-        releaseTimer = null;
-        move([]);
-        dodge = null;
-      }, maxDodgeTime);
+      dodge = { direction: null, distance: Infinity, progressAt: now, checkAt: now, clear: 0, avoidUntil: new Map() };
     }
     dodge.clear = 0;
-    if (dodge.direction && now >= dodge.checkAt) {
-      const distance = exitDistance(data, dodge.direction);
-      if (distance < dodge.distance - 6) {
-        dodge.distance = distance;
-        dodge.checkAt = now + directionRetryTime;
-      } else {
-        dodge.tried.add(dodge.direction);
-        dodge.direction = null;
+    if (now >= dodge.checkAt) {
+      dodge.checkAt = now + 95;
+      const routes = directions.map(direction => assessEscape(data, direction));
+      const current = routes.find(route => route.direction === dodge.direction);
+      if (current && current.exit < dodge.distance) {
+        dodge.distance = current.exit;
+        dodge.progressAt = now;
+      }
+      const stalled = current && Number.isFinite(current.exit) && now - dodge.progressAt >= 380;
+      let best = current;
+      let bestScore = current ? current.score - 22 + (stalled ? 62 : 0) : Infinity;
+      for (const route of routes) {
+        if (route.direction === dodge.direction || (dodge.avoidUntil.get(route.direction) ?? 0) > now) continue;
+        if (route.score >= bestScore) continue;
+        best = route;
+        bestScore = route.score;
+      }
+      if (best && best.direction !== dodge.direction) {
+        if (stalled) dodge.avoidUntil.set(dodge.direction, now + 520);
+        dodge.direction = best.direction;
+        dodge.distance = best.exit;
+        dodge.progressAt = now;
       }
     }
-    if (!dodge.direction) {
-      let distance = Infinity;
-      let fallback = null, fallbackRisk = Infinity;
-      for (const direction of directions) {
-        if (dodge.tried.has(direction)) continue;
-        const candidate = exitDistance(data, direction);
-        if (!Number.isFinite(candidate)) {
-          let risk = 0;
-          for (let reach = 24; reach <= 180; reach += 12) {
-            if (warningTint(data, direction.x * reach, direction.y * reach)) risk++;
-          }
-          if (risk < fallbackRisk) {
-            fallback = direction;
-            fallbackRisk = risk;
-          }
-        }
-        if (candidate >= distance) continue;
-        dodge.direction = direction;
-        distance = candidate;
-      }
-      dodge.direction ??= fallback;
-      dodge.distance = distance;
-      dodge.checkAt = now + directionRetryTime;
-    }
-    if (dodge.direction) {
-      move(dodge.direction.keys);
-      show('闪避 ' + dodge.direction.label);
-    } else {
-      move([]);
-      show('重新判断闪避方向');
-    }
+    drive(dodge.direction);
+    show('闪避 ' + dodge.direction.label);
   }
 
   function frame(now) {
@@ -785,9 +811,11 @@
         captureCandidate = null;
         resetEvents();
         stepDodge(data, now);
-      } else if (!dodge || ++dodge.clear >= 2) {
+      } else if (!dodge || ++dodge.clear >= 3) {
         stopDodge();
         if (!stepCapture(hud, now)) stepEvent(data, now);
+      } else {
+        drive(dodge.direction);
       }
     } catch (error) {
       enabled = false;
