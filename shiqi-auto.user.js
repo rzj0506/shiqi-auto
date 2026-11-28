@@ -2,7 +2,7 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.10.0
+// @version      0.11.0
 // @description  副本内自动闪避、拾取、抓宠及处理事件，支持指定地图重复战斗和自动开荒。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
@@ -79,6 +79,8 @@
     ['sajif', '沙己夫'], ['stonel', '史東爾', '史东尔'], ['wreck', '沉船'], ['deepsea', '深海通道'], ['icesea', '流冰'],
   ].map(([id, nativeName, label], index) => ({ id, nativeName, label: label ?? nativeName, number: index + 1, chapter: index < 9 ? 0 : 1 }));
   const difficultyLevels = Array.from({ length: 19 }, (_, index) => 100 + 50 * index);
+  const difficultyPageSize = 9;
+  const highestDifficulty = 'highest';
   const options = {
     magnet: false, magnetSlot: '', capture: false, rate: 60, pickupBefore: 0, avoidMonsters: true,
     battleMode: 'off', battleMap: '', battleDifficulty: '',
@@ -93,7 +95,9 @@
     options.battleMode = ['off', 'repeat', 'frontier'].includes(saved?.battleMode)
       ? saved.battleMode : saved?.repeat === true ? 'repeat' : 'off';
     if (maps.some(map => map.id === saved?.battleMap)) options.battleMap = saved.battleMap;
-    if (difficultyLevels.includes(Number(saved?.battleDifficulty))) options.battleDifficulty = String(saved.battleDifficulty);
+    if (saved?.battleDifficulty === highestDifficulty || difficultyLevels.includes(Number(saved?.battleDifficulty))) {
+      options.battleDifficulty = String(saved.battleDifficulty);
+    }
     options.avoidMonsters = saved?.avoidMonsters !== false;
     if (slotKeys.includes(saved?.magnetSlot)) options.magnetSlot = saved.magnetSlot;
     if (validNumber(saved?.rate, 100)) options.rate = saved.rate;
@@ -253,6 +257,7 @@
   for (const map of maps) mapSelect.add(new Option(map.number + '. ' + map.label, map.id));
   const difficultySelect = shadow.querySelector('#battleDifficulty');
   difficultySelect.add(new Option('沿用当前所选', ''));
+  difficultySelect.add(new Option('当前可选的最高难度', highestDifficulty));
   for (const level of difficultyLevels) difficultySelect.add(new Option(level + '%', String(level)));
 
   for (const field of ['magnet', 'magnetSlot', 'capture', 'rate', 'pickupBefore', 'avoidMonsters', 'battleMode', 'battleMap', 'battleDifficulty']) {
@@ -899,6 +904,7 @@
   let battleMap = null, nextMapScan = 0, pickupPlan = null, pickupBlockedUntil = 0, monsterPlan = null;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0, petPlan = null;
   let resultSince = null, repeatSent = false, runRoute = null, menuAction = null, frontierStarted = false;
+  let repeatHighest = null;
 
   function show(status) {
     if (status === lastStatus) return;
@@ -1048,6 +1054,7 @@
     runRoute = null;
     menuAction = null;
     frontierStarted = false;
+    repeatHighest = null;
   }
 
   function pressCanvasButton(point) {
@@ -1089,6 +1096,28 @@
     return orange >= 2;
   }
 
+  function findHighestDifficulty(route, available, now) {
+    const first = available[0];
+    const last = available.at(-1);
+    const count = Math.min(difficultyPageSize, difficultyLevels.length - first);
+    if (first % difficultyPageSize || available.length !== count || last !== first + count - 1) return null;
+
+    const highest = available.findLast(index => !route.difficulties.get(index).locked);
+    if (highest != null) {
+      if (highest < last || last === difficultyLevels.length - 1) return highest;
+      // 整页都可选时继续往后看，下一页全锁就用这一页的最高档。
+      runRoute.highestSeen = highest;
+    } else if (runRoute.highestSeen != null) {
+      return runRoute.highestSeen;
+    }
+
+    const arrow = highest == null ? '◀' : '▶';
+    if (route.pages[arrow]) {
+      selectMenu('highest:' + first + ':' + arrow, now, '查找当前可选的最高难度', () => pressCanvasButton(route.pages[arrow]));
+    }
+    return null;
+  }
+
   function stepRunResult(hud, now) {
     resetBattleTracking();
     resultSince ??= now;
@@ -1104,6 +1133,7 @@
     const fixed = difficultyLevels.indexOf(Number(options.battleDifficulty));
     const map = options.battleMap || last?.map;
     const frontier = options.battleMode === 'frontier';
+    const highest = options.battleDifficulty === highestDifficulty;
     if (frontier && !hud.outcome) {
       show('等待确认通关结果');
       return true;
@@ -1113,17 +1143,21 @@
       return true;
     }
 
-    let index = fixed >= 0 ? fixed : (last?.map === map ? last?.index : null);
-    let fallback = null;
     const sameMap = Boolean(last && last.map === map);
-    if (frontier && sameMap && (frontierStarted || fixed < 0 || last.index === fixed)) {
+    const repeatIndex = repeatHighest && repeatHighest.map === map ? repeatHighest.index : null;
+    const scanHighest = highest && (frontier ? !frontierStarted || !sameMap : repeatIndex == null);
+    let index = fixed >= 0 ? fixed : (sameMap ? last.index : null);
+    if (scanHighest) index = null;
+    else if (highest && !frontier) index = repeatIndex;
+    let fallback = null;
+    if (frontier && sameMap && !scanHighest && (frontierStarted || fixed < 0 || last.index === fixed)) {
       const step = hud.outcome === 'win' ? 1 : -1;
       index = Math.min(difficultyLevels.length - 1, Math.max(0, last.index + step));
       if (step > 0 && index > last.index) fallback = last.index;
       frontierStarted = true;
     }
 
-    if ((!frontier && !options.battleMap && fixed < 0) || (sameMap && last.index === index)) {
+    if ((!frontier && !highest && !options.battleMap && fixed < 0) || (sameMap && last.index === index)) {
       repeatSent = true;
       tap('Enter');
       show('已请求再来一局');
@@ -1133,7 +1167,7 @@
       show('请先选择地图');
       return true;
     }
-    runRoute = { map, index, fallback, returning: true };
+    runRoute = { map, index, fallback, scanHighest, returning: true };
     selectMenu('return', now, '回村选择地图和难度', () => pressCanvasButton(hud.returnToVillage));
     return true;
   }
@@ -1146,10 +1180,14 @@
     if (!runRoute) {
       const last = readLastDeparture();
       const fixed = difficultyLevels.indexOf(Number(options.battleDifficulty));
-      if (options.battleMode === 'repeat' && !options.battleMap && fixed < 0) return false;
+      const highest = options.battleDifficulty === highestDifficulty;
+      const repeat = options.battleMode === 'repeat';
+      if (repeat && !highest && !options.battleMap && fixed < 0) return false;
       const map = options.battleMap || route.map || last?.map;
       if (!map) return false;
-      runRoute = { map, index: fixed >= 0 ? fixed : null, fallback: null };
+      const repeatIndex = repeat && repeatHighest?.map === map ? repeatHighest.index : null;
+      const index = fixed >= 0 ? fixed : repeatIndex;
+      runRoute = { map, index, fallback: null, scanHighest: highest && index == null };
     }
     runRoute.returning = false;
     if (!route.list && !route.launch) {
@@ -1175,6 +1213,10 @@
 
     const available = [...route.difficulties.keys()].sort((a, b) => a - b);
     if (!available.length) return true;
+    if (runRoute.index == null && runRoute.scanHighest) {
+      runRoute.index = findHighestDifficulty(route, available, now);
+      if (runRoute.index == null) return true;
+    }
     if (runRoute.index == null) {
       const last = readLastDeparture();
       runRoute.index = available.find(index => selectedDifficulty(route.difficulties.get(index).point))
@@ -1201,8 +1243,11 @@
     } else if (route.custom || !selectedDifficulty(detail.point)) {
       selectMenu('difficulty:' + index, now, '选择难度 · ' + label, () => pressCanvasButton(detail.point));
     } else {
-      if (options.battleMode === 'frontier') frontierStarted = true;
-      selectMenu('launch:' + wanted.id + ':' + index, now, '出发 · ' + label, () => pressCanvasButton(route.launch));
+      selectMenu('launch:' + wanted.id + ':' + index, now, '出发 · ' + label, () => {
+        if (options.battleMode === 'frontier') frontierStarted = true;
+        else if (runRoute.scanHighest) repeatHighest = { map: wanted.id, index };
+        pressCanvasButton(route.launch);
+      });
     }
     return true;
   }
