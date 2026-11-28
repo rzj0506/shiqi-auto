@@ -2,7 +2,7 @@
 // @name         石器倖存者自動躲避
 // @name:zh-CN   石器幸存者助手
 // @namespace    sa-survivors-local-helper
-// @version      0.11.0
+// @version      0.11.1
 // @description  副本内自动闪避、拾取、抓宠及处理事件，支持指定地图重复战斗和自动开荒。
 // @match        https://sa-survivors.com/survivors/*
 // @homepageURL  https://github.com/rzj0506/shiqi-auto
@@ -367,8 +367,12 @@
       route.custom = true;
     } else if (text.startsWith('組隊出發：') || text.startsWith('組隊中：只有隊長') || text.startsWith('組隊：全隊用')) {
       route.party = true;
-    } else if (x === 400 && y >= 46 && y <= 66 && (text === '勝利！' || text.startsWith('倒下了'))) {
+    } else if (x === 400 && y >= 36 && y <= 66 && (text === '勝利！' || text.startsWith('倒下了'))) {
       hud.outcome = text === '勝利！' ? 'win' : 'loss';
+    } else if (text === '再來一局' && y >= 530 && y <= 546 && /^(#fff|#ffffff)$/.test(color)) {
+      hud.repeat = menuPoint(gameContext, x, y);
+    } else if (text === '回到村莊' && y >= 530 && y <= 546) {
+      hud.returnToVillage = menuPoint(gameContext, x, y);
     } else if (x === 400 && y >= 85 && y <= 92) {
       const map = maps.find(entry => entry.nativeName === text);
       if (map) route.map = map.id;
@@ -418,11 +422,6 @@
       hud.level = hud.levelBadge;
     } else if (text === '結算' || text === '結算 Enter') {
       if (y >= 65 && y <= 92) hud.loot = true;
-    } else if (text === '再來一局' && y >= 537 && y <= 546) {
-      hud.repeat = /^(#fff|#ffffff)$/.test(gameContext.fillStyle);
-    } else if (text === '回到村莊' && y >= 537 && y <= 546) {
-      hud.result = true;
-      hud.returnToVillage = menuPoint(gameContext, x, y);
     } else if (text.startsWith('捕捉中') && y >= 223 && y <= 240) {
       hud.capturing = true;
     } else if (y >= 551 && y <= 559 && Math.abs(canvas.width / gameContext.getTransform().a - x - 62) < 70) {
@@ -903,7 +902,7 @@
   let eventPlan = null, eventList = [], nextEventScan = 0, retryMerchantAt = 0, eventZoom = 1;
   let battleMap = null, nextMapScan = 0, pickupPlan = null, pickupBlockedUntil = 0, monsterPlan = null;
   let magnetUsed = false, captureCandidate = null, nextCaptureAt = 0, petPlan = null;
-  let resultSince = null, repeatSent = false, runRoute = null, menuAction = null, frontierStarted = false;
+  let resultSince = null, runRoute = null, menuAction = null, frontierStarted = false;
   let repeatHighest = null;
 
   function show(status) {
@@ -1050,7 +1049,6 @@
 
   function resetRunRouting() {
     resultSince = null;
-    repeatSent = false;
     runRoute = null;
     menuAction = null;
     frontierStarted = false;
@@ -1121,8 +1119,12 @@
   function stepRunResult(hud, now) {
     resetBattleTracking();
     resultSince ??= now;
-    if (repeatSent || now - resultSince < 900) {
-      show(repeatSent ? '已请求再来一局' : '等待结算完成');
+    if (now - resultSince < 900) {
+      show('等待结算完成');
+      return true;
+    }
+    if (!hud.repeat) {
+      show('等待「再来一局」可用');
       return true;
     }
     if (runRoute?.returning) {
@@ -1158,9 +1160,7 @@
     }
 
     if ((!frontier && !highest && !options.battleMap && fixed < 0) || (sameMap && last.index === index)) {
-      repeatSent = true;
-      tap('Enter');
-      show('已请求再来一局');
+      selectMenu('repeat', now, '再来一局', () => pressCanvasButton(hud.repeat));
       return true;
     }
     if (!map) {
@@ -1254,7 +1254,7 @@
 
   function stepBattleMenu(hud, now) {
     if (options.battleMode === 'off' || !hud) return false;
-    if (hud.result && hud.repeat) return stepRunResult(hud, now);
+    if (hud.returnToVillage) return stepRunResult(hud, now);
     resultSince = null;
     const route = hud.route;
     if (route.list || route.launch || (route.village && !hud.level)) {
@@ -1608,7 +1608,6 @@
         show('等待战斗画面');
         return;
       }
-      repeatSent = false;
       runRoute = null;
       menuAction = null;
       // 看见下一轮正常战斗后，才允许再次使用磁石。
